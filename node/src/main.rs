@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
             "quit" => break,
             "accept" => {
                 //接受连接
-                println!("接受连接...");
+                println!("等待连接...");
                 if let Some(connecting) = endpoint.accept().await {
                     let connection = connecting.await?;
                     println!("[{}]节点连接成功", connection.remote_address());
