@@ -2,11 +2,13 @@ use std::{
     fs::{create_dir_all, File},
     io::{stdin, Read, Write},
     path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Result;
 use clap::Parser;
-use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, VarInt};
+use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
 
 #[derive(Parser, Clone)]
 struct CLIArgs {
@@ -26,6 +28,7 @@ struct CLIArgs {
 
 struct App {
     endpoint: Endpoint,
+    cert_file_dir_path: PathBuf,
 }
 impl App {
     async fn new() -> Result<Self> {
@@ -58,9 +61,9 @@ impl App {
         let mut cert = Vec::new();
         File::open(cert_file_dir_path.join(cli_args.root_node_name.clone() + ".cer"))?
             .read_to_end(&mut cert)?;
-        let mut root_cert_store = rustls::RootCertStore::empty();
-        root_cert_store.add(&rustls::Certificate(cert))?;
-        endpoint.set_default_client_config(ClientConfig::with_root_certificates(root_cert_store));
+        let mut cert_store = rustls::RootCertStore::empty();
+        cert_store.add(&rustls::Certificate(cert))?;
+        endpoint.set_default_client_config(ClientConfig::with_root_certificates(cert_store));
         println!("加载根节点证书设置为默认信任证书成功");
         //连接根节点
         let connection = endpoint
@@ -76,15 +79,18 @@ impl App {
                 .await?,
         )?;
         println!("获取到的IP地址[{}]", ipaddr);
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            cert_file_dir_path,
+        })
     }
     async fn run(self) -> Result<()> {
         //终端交互
         println!("[quit]退出程序");
         println!("[accept]接收连接");
         println!("[connect]连接");
-        println!("[输入命令]");
         loop {
+            println!("[输入命令]");
             let mut stdin_str = String::new();
             stdin().read_line(&mut stdin_str)?;
             match stdin_str.trim_end() {
@@ -100,10 +106,6 @@ impl App {
                 }
                 "connect" => {
                     //接收参数
-                    println!("[对象证书路径]");
-                    let mut stdin_str = String::new();
-                    stdin().read_line(&mut stdin_str)?;
-                    let cert_path = stdin_str.trim_end();
                     println!("[对象IP地址]");
                     let mut stdin_str = String::new();
                     stdin().read_line(&mut stdin_str)?;
@@ -111,16 +113,21 @@ impl App {
                     println!("[对象节点名称]");
                     let mut stdin_str = String::new();
                     stdin().read_line(&mut stdin_str)?;
-                    let node_name = stdin_str.trim_end();
+                    let node_name = stdin_str.trim_end().to_string();
                     //连接节点
                     let mut cert = Vec::new();
-                    File::open(cert_path)?.read_to_end(&mut cert)?;
+                    File::open(self.cert_file_dir_path.join(node_name.clone() + ".cer"))?
+                        .read_to_end(&mut cert)?;
                     let mut cert_store = rustls::RootCertStore::empty();
                     cert_store.add(&rustls::Certificate(cert))?;
+                    let mut transport_config = TransportConfig::default();
+                    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
                     let connection = self
                         .endpoint
                         .connect_with(
-                            ClientConfig::with_root_certificates(cert_store),
+                            ClientConfig::with_root_certificates(cert_store)
+                                .transport_config(Arc::new(transport_config))
+                                .clone(),
                             ipaddr.parse()?,
                             &node_name,
                         )?
@@ -170,9 +177,13 @@ impl App {
                 connection.close(VarInt::from_u32(0), "正常关闭连接".as_bytes());
                 break;
             }
-            let mut send = connection.open_uni().await?;
-            send.write_all(stdin_str.as_bytes()).await?;
-            send.finish().await?;
+            match connection.open_uni().await {
+                Ok(mut send) => {
+                    send.write_all(stdin_str.as_bytes()).await?;
+                    send.finish().await?;
+                }
+                Err(_) => break,
+            }
         }
         Ok(())
     }
