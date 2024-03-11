@@ -12,7 +12,7 @@ struct CLIArgs {
     ///主机名称
     #[arg(long)]
     host_name: String,
-    ///输出目录
+    ///输出目录，默认"./"
     #[arg(long)]
     out_dir: Option<String>,
 }

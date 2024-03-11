@@ -13,18 +13,15 @@ struct CLIArgs {
     ///节点名称
     #[arg(long)]
     node_name: String,
-    ///根节点证书文件路径
-    #[arg(long)]
-    root_node_cert_path: String,
     ///根节点IP地址
     #[arg(long)]
     root_node_ipaddr: String,
     ///根节点名称
     #[arg(long)]
     root_node_name: String,
-    ///节点证书输出目录
+    ///证书文件目录路径，默认"./"。会根据设置的节点和根节点名称配置证书文件名称
     #[arg(long)]
-    node_cert_out_dir: Option<String>,
+    cert_file_dir_path: Option<String>,
 }
 
 struct App {
@@ -34,16 +31,18 @@ impl App {
     async fn new() -> Result<Self> {
         //解析命令行参数
         let cli_args = CLIArgs::parse();
+        //设置默认证书输出目录
+        let mut cert_file_dir_path = PathBuf::from("./");
         //生成证书
         let certificate_params = rcgen::CertificateParams::new(vec![cli_args.node_name.clone()]);
         let certificate = rcgen::Certificate::from_params(certificate_params)?;
-        //设置节点证书输出目录
-        let mut node_cert_out_dir = PathBuf::from("./");
-        if let Some(cli_args_node_cert_out_dir) = cli_args.node_cert_out_dir {
-            node_cert_out_dir = PathBuf::from(cli_args_node_cert_out_dir);
+        //确认证书输出目录
+        if let Some(cli_args_cert_file_dir_path) = cli_args.cert_file_dir_path {
+            cert_file_dir_path = PathBuf::from(cli_args_cert_file_dir_path);
         }
-        create_dir_all(node_cert_out_dir.clone())?;
-        File::create(node_cert_out_dir.join(cli_args.node_name + ".cer"))?
+        //输出节点证书
+        create_dir_all(cert_file_dir_path.clone())?;
+        File::create(cert_file_dir_path.join(cli_args.node_name + ".cer"))?
             .write_all(certificate.serialize_der()?.as_slice())?;
         println!("证书生成成功");
         //创建节点
@@ -57,7 +56,8 @@ impl App {
         println!("节点创建成功");
         //加载根节点证书设置为默认信任证书
         let mut cert = Vec::new();
-        File::open(cli_args.root_node_cert_path)?.read_to_end(&mut cert)?;
+        File::open(cert_file_dir_path.join(cli_args.root_node_name.clone() + ".cer"))?
+            .read_to_end(&mut cert)?;
         let mut root_cert_store = rustls::RootCertStore::empty();
         root_cert_store.add(&rustls::Certificate(cert))?;
         endpoint.set_default_client_config(ClientConfig::with_root_certificates(root_cert_store));
