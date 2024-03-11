@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
         "0.0.0.0:10270".parse()?,
     )?;
     println!("根节点创建成功");
-    //接受连接
+    //接收连接
     while let Some(connecting) = endpoint.accept().await {
         tokio::spawn(async move {
             let connection = connecting.await?;
@@ -40,6 +40,11 @@ async fn main() -> Result<()> {
             send.write_all(connection.remote_address().to_string().as_bytes())
                 .await?;
             send.finish().await?;
+            println!(
+                "[{}]节点断开连接，原因：{}",
+                connection.remote_address(),
+                connection.closed().await
+            );
             anyhow::Ok(())
         });
     }
