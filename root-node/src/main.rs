@@ -1,8 +1,8 @@
-use std::{fs::File, io::Read};
+use std::{fs::File, io::Read, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
-use quinn::{Endpoint, ServerConfig};
+use quinn::{Endpoint, ServerConfig, TransportConfig};
 
 #[derive(Parser)]
 struct CLIArgs {
@@ -25,8 +25,12 @@ async fn main() -> Result<()> {
     File::open(cli_args.key_path)?.read_to_end(&mut key)?;
     println!("根节点证书加载成功");
     //创建根节点
+    let mut transport_config = TransportConfig::default();
+    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
     let endpoint = Endpoint::server(
-        ServerConfig::with_single_cert(vec![rustls::Certificate(cert)], rustls::PrivateKey(key))?,
+        ServerConfig::with_single_cert(vec![rustls::Certificate(cert)], rustls::PrivateKey(key))?
+            .transport_config(Arc::new(transport_config))
+            .clone(),
         "0.0.0.0:10270".parse()?,
     )?;
     println!("根节点创建成功");

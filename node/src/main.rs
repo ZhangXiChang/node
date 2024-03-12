@@ -49,11 +49,15 @@ impl App {
             .write_all(certificate.serialize_der()?.as_slice())?;
         println!("证书生成成功");
         //创建节点
+        let mut transport_config = TransportConfig::default();
+        transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
         let mut endpoint = Endpoint::server(
             ServerConfig::with_single_cert(
                 vec![rustls::Certificate(certificate.serialize_der()?)],
                 rustls::PrivateKey(certificate.serialize_private_key_der()),
-            )?,
+            )?
+            .transport_config(Arc::new(transport_config))
+            .clone(),
             "0.0.0.0:0".parse()?,
         )?;
         println!("节点创建成功");
@@ -120,14 +124,10 @@ impl App {
                         .read_to_end(&mut cert)?;
                     let mut cert_store = rustls::RootCertStore::empty();
                     cert_store.add(&rustls::Certificate(cert))?;
-                    let mut transport_config = TransportConfig::default();
-                    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
                     let connection = self
                         .endpoint
                         .connect_with(
-                            ClientConfig::with_root_certificates(cert_store)
-                                .transport_config(Arc::new(transport_config))
-                                .clone(),
+                            ClientConfig::with_root_certificates(cert_store),
                             ipaddr.parse()?,
                             &node_name,
                         )?
