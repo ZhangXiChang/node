@@ -114,15 +114,22 @@ async fn main() -> Result<()> {
                     .read_to_end(&mut cert)?;
                 let mut cert_store = rustls::RootCertStore::empty();
                 cert_store.add(&rustls::Certificate(cert))?;
-                let connection = endpoint
+                match endpoint
                     .connect_with(
                         ClientConfig::with_root_certificates(cert_store),
                         ipaddr.parse()?,
                         &node_name,
                     )?
-                    .await?;
-                println!("节点连接成功");
-                chat(connection).await?;
+                    .await
+                {
+                    Ok(connection) => {
+                        println!("节点连接成功");
+                        chat(connection).await?;
+                    }
+                    Err(err) => {
+                        println!("节点连接失败，原因：{}", err);
+                    }
+                };
             }
             _ => println!("没有[{}]这样的命令", stdin_str),
         }
