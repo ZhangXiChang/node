@@ -1,18 +1,19 @@
 use std::{fs::File, io::Read, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use bincode::{Decode, Encode};
 use clap::Parser;
 use quinn::{Endpoint, ServerConfig, TransportConfig};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-#[derive(Encode, Decode)]
+#[derive(Serialize, Deserialize)]
 enum DataPacket {
     RequestRegisterNode {
         node_name: String,
         node_cert: Vec<u8>,
     },
     RequestGetOnlineNode,
+    Test,
 }
 
 #[derive(Parser)]
@@ -62,34 +63,30 @@ async fn main() -> Result<()> {
             //应答
             loop {
                 match connection.accept_uni().await {
-                    Ok(mut recv) => {
-                        let data_packet: DataPacket = bincode::decode_from_slice(
-                            recv.read_to_end(usize::MAX).await?.as_slice(),
-                            bincode::config::standard(),
-                        )?
-                        .0;
-                        match data_packet {
-                            DataPacket::RequestRegisterNode {
-                                node_name,
-                                node_cert,
-                            } => {
-                                let mut online_node = online_node.lock().await;
-                                online_node.push(NodeInfo {
-                                    name: node_name,
-                                    cert: node_cert,
-                                    id: connection.stable_id(),
-                                });
-                            }
-                            DataPacket::RequestGetOnlineNode => {
-                                let online_node = online_node.lock().await;
-                                let mut send = connection.open_uni().await?;
-                                for node_info in online_node.iter() {
-                                    send.write_all(node_info.name.as_bytes()).await?;
-                                }
-                                send.finish().await?;
-                            }
+                    Ok(mut recv) => match rmp_serde::from_slice::<DataPacket>(
+                        recv.read_to_end(usize::MAX).await?.as_slice(),
+                    )? {
+                        DataPacket::RequestRegisterNode {
+                            node_name,
+                            node_cert,
+                        } => {
+                            let mut online_node = online_node.lock().await;
+                            online_node.push(NodeInfo {
+                                name: node_name,
+                                cert: node_cert,
+                                id: connection.stable_id(),
+                            });
                         }
-                    }
+                        DataPacket::RequestGetOnlineNode => {
+                            let online_node = online_node.lock().await;
+                            let mut send = connection.open_uni().await?;
+                            for node_info in online_node.iter() {
+                                send.write_all(node_info.name.as_bytes()).await?;
+                            }
+                            send.finish().await?;
+                        }
+                        DataPacket::Test => println!("测试！"),
+                    },
                     Err(err) => {
                         println!(
                             "[{}]节点断开连接，原因：{}",

@@ -8,7 +8,18 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
+use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+enum DataPacket {
+    RequestRegisterNode {
+        node_name: String,
+        node_cert: Vec<u8>,
+    },
+    RequestGetOnlineNode,
+    Test,
+}
 
 #[derive(Parser, Clone)]
 struct CLIArgs {
@@ -58,27 +69,18 @@ async fn main() -> Result<()> {
     )?;
     println!("节点创建成功");
     //加载根节点证书设置为默认信任证书
-    let mut cert = Vec::new();
+    let mut root_node_cert = Vec::new();
     File::open(cert_file_dir_path.join(cli_args.root_node_name.clone() + ".cer"))?
-        .read_to_end(&mut cert)?;
-    let mut cert_store = rustls::RootCertStore::empty();
-    cert_store.add(&rustls::Certificate(cert))?;
-    endpoint.set_default_client_config(ClientConfig::with_root_certificates(cert_store));
+        .read_to_end(&mut root_node_cert)?;
+    let mut root_node_cert_store = rustls::RootCertStore::empty();
+    root_node_cert_store.add(&rustls::Certificate(root_node_cert))?;
+    endpoint.set_default_client_config(ClientConfig::with_root_certificates(root_node_cert_store));
     println!("加载根节点证书设置为默认信任证书成功");
     //连接根节点
-    let connection = endpoint
+    let root_node_connection = endpoint
         .connect(cli_args.root_node_ipaddr.parse()?, &cli_args.root_node_name)?
         .await?;
     println!("根节点连接成功");
-    //从根节点获取自身外部IP地址
-    let ipaddr = String::from_utf8(
-        connection
-            .accept_uni()
-            .await?
-            .read_to_end(usize::MAX)
-            .await?,
-    )?;
-    println!("获取到的IP地址[{}]", ipaddr);
     //终端交互
     println!("[quit]退出程序");
     println!("[accept]接收连接");
@@ -87,15 +89,15 @@ async fn main() -> Result<()> {
         println!("[输入命令]");
         let mut stdin_str = String::new();
         stdin().read_line(&mut stdin_str)?;
-        match stdin_str.trim_end() {
+        let stdin_str = stdin_str.trim_end();
+        match stdin_str {
             "quit" => break,
             "accept" => {
                 //接收连接
-                println!("等待连接");
+                println!("等待连接中...");
                 if let Some(connecting) = endpoint.accept().await {
                     let connection = connecting.await?;
                     println!("[{}]节点连接成功", connection.remote_address());
-                    chat(connection).await?;
                 }
             }
             "connect" => {
@@ -103,28 +105,27 @@ async fn main() -> Result<()> {
                 println!("[对象IP地址]");
                 let mut stdin_str = String::new();
                 stdin().read_line(&mut stdin_str)?;
-                let ipaddr = stdin_str.trim_end();
+                let node_addr = stdin_str.trim_end();
                 println!("[对象节点名称]");
                 let mut stdin_str = String::new();
                 stdin().read_line(&mut stdin_str)?;
-                let node_name = stdin_str.trim_end().to_string();
+                let node_name = stdin_str.trim_end();
                 //连接节点
-                let mut cert = Vec::new();
-                File::open(cert_file_dir_path.join(node_name.clone() + ".cer"))?
-                    .read_to_end(&mut cert)?;
-                let mut cert_store = rustls::RootCertStore::empty();
-                cert_store.add(&rustls::Certificate(cert))?;
+                let mut node_cert = Vec::new();
+                File::open(cert_file_dir_path.join(node_name.to_string() + ".cer"))?
+                    .read_to_end(&mut node_cert)?;
+                let mut node_cert_store = rustls::RootCertStore::empty();
+                node_cert_store.add(&rustls::Certificate(node_cert))?;
                 match endpoint
                     .connect_with(
-                        ClientConfig::with_root_certificates(cert_store),
-                        ipaddr.parse()?,
+                        ClientConfig::with_root_certificates(node_cert_store),
+                        node_addr.parse()?,
                         &node_name,
                     )?
                     .await
                 {
                     Ok(connection) => {
                         println!("节点连接成功");
-                        chat(connection).await?;
                     }
                     Err(err) => {
                         println!("节点连接失败，原因：{}", err);
@@ -132,52 +133,6 @@ async fn main() -> Result<()> {
                 };
             }
             _ => println!("没有[{}]这样的命令", stdin_str),
-        }
-    }
-    Ok(())
-}
-async fn chat(connection: Connection) -> Result<()> {
-    //接收消息
-    tokio::spawn({
-        let connection = connection.clone();
-        async move {
-            loop {
-                match connection.accept_uni().await {
-                    Ok(mut recv) => println!(
-                        "[{}]：{}",
-                        connection.remote_address(),
-                        String::from_utf8(recv.read_to_end(usize::MAX).await?)?
-                    ),
-                    Err(err) => {
-                        println!(
-                            "[{}]节点断开连接，原因：{}",
-                            connection.remote_address(),
-                            err
-                        );
-                        break;
-                    }
-                }
-            }
-            anyhow::Ok(())
-        }
-    });
-    //发送消息
-    println!("[/close]关闭连接");
-    println!("[开始聊天吧]");
-    loop {
-        let mut stdin_str = String::new();
-        stdin().read_line(&mut stdin_str)?;
-        let stdin_str = stdin_str.trim_end();
-        if stdin_str == "/close" {
-            connection.close(VarInt::from_u32(0), "正常关闭连接".as_bytes());
-            break;
-        }
-        match connection.open_uni().await {
-            Ok(mut send) => {
-                send.write_all(stdin_str.as_bytes()).await?;
-                send.finish().await?;
-            }
-            Err(_) => break,
         }
     }
     Ok(())
