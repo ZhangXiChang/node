@@ -2,19 +2,9 @@ use std::{fs::File, io::Read, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
-use quinn::{Endpoint, ServerConfig, TransportConfig};
-use serde::{Deserialize, Serialize};
+use node_network::{DataPacket, NodeAddrAndCert, RequestDataPacket, ResponseDataPacket};
+use quinn::{Connection, Endpoint, ServerConfig, TransportConfig};
 use tokio::sync::Mutex;
-
-#[derive(Serialize, Deserialize)]
-enum DataPacket {
-    RequestRegisterNode {
-        node_name: String,
-        node_cert: Vec<u8>,
-    },
-    RequestGetOnlineNode,
-    Test,
-}
 
 #[derive(Parser)]
 struct CLIArgs {
@@ -26,10 +16,10 @@ struct CLIArgs {
     key_path: String,
 }
 
-struct NodeInfo {
+struct Node {
     name: String,
+    connection: Connection,
     cert: Vec<u8>,
-    id: usize,
 }
 
 #[tokio::main]
@@ -52,40 +42,100 @@ async fn main() -> Result<()> {
         "0.0.0.0:10270".parse()?,
     )?;
     println!("根节点创建成功");
-    //在线节点储存
-    let online_node = Arc::new(Mutex::new(Vec::new()));
+    //注册的节点列表
+    let node_list = Arc::new(Mutex::new(Vec::new()));
     //接收连接
     while let Some(connecting) = endpoint.accept().await {
-        let online_node = online_node.clone();
+        let node_list = node_list.clone();
         tokio::spawn(async move {
             let connection = connecting.await?;
             println!("[{}]节点连接成功", connection.remote_address());
             //应答
             loop {
-                match connection.accept_uni().await {
-                    Ok(mut recv) => match rmp_serde::from_slice::<DataPacket>(
-                        recv.read_to_end(usize::MAX).await?.as_slice(),
+                match connection.accept_bi().await {
+                    Ok((mut send, mut recv)) => match rmp_serde::from_slice::<DataPacket>(
+                        &recv.read_to_end(usize::MAX).await?,
                     )? {
-                        DataPacket::RequestRegisterNode {
+                        DataPacket::RegisterNode {
                             node_name,
                             node_cert,
                         } => {
-                            let mut online_node = online_node.lock().await;
-                            online_node.push(NodeInfo {
+                            let mut node_list = node_list.lock().await;
+                            node_list.push(Node {
                                 name: node_name,
+                                connection: connection.clone(),
                                 cert: node_cert,
-                                id: connection.stable_id(),
                             });
                         }
-                        DataPacket::RequestGetOnlineNode => {
-                            let online_node = online_node.lock().await;
-                            let mut send = connection.open_uni().await?;
-                            for node_info in online_node.iter() {
-                                send.write_all(node_info.name.as_bytes()).await?;
+                        DataPacket::Request(RequestDataPacket::GetRegisteredNodeNameList) => {
+                            let node_list = node_list.lock().await;
+                            let mut registered_node_name_list = Vec::new();
+                            for node in node_list.iter() {
+                                registered_node_name_list.push(node.name.clone());
                             }
+                            send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
+                                ResponseDataPacket::GetRegisteredNodeNameList {
+                                    registered_node_name_list,
+                                },
+                            ))?)
+                            .await?;
                             send.finish().await?;
                         }
-                        DataPacket::Test => println!("测试！"),
+                        DataPacket::Request(RequestDataPacket::GetRegisteredNodeAddrAndCert {
+                            node_name,
+                        }) => {
+                            let node_list = node_list.lock().await;
+                            let mut node = None;
+                            for i in node_list.iter() {
+                                if i.name == node_name {
+                                    node = Some(i);
+                                }
+                            }
+                            if let Some(node) = node {
+                                let mut node_send = node.connection.open_uni().await?;
+                                node_send
+                                    .write_all(&rmp_serde::to_vec(&DataPacket::Request(
+                                        RequestDataPacket::HolePunching {
+                                            addr: connection.remote_address(),
+                                        },
+                                    ))?)
+                                    .await?;
+                                node_send.finish().await?;
+                                match node.connection.accept_uni().await {
+                                    Ok(mut node_recv) => match rmp_serde::from_slice::<DataPacket>(
+                                        &node_recv.read_to_end(usize::MAX).await?,
+                                    )? {
+                                        DataPacket::Response(ResponseDataPacket::HolePunching) => {
+                                            let node_addr_and_cert = DataPacket::Response(
+                                                ResponseDataPacket::GetRegisteredNodeAddrAndCert(
+                                                    Ok(NodeAddrAndCert {
+                                                        addr: node.connection.remote_address(),
+                                                        cert: node.cert.clone(),
+                                                    }),
+                                                ),
+                                            );
+                                            send.write_all(&rmp_serde::to_vec(
+                                                &node_addr_and_cert,
+                                            )?)
+                                            .await?;
+                                            send.finish().await?;
+                                        }
+                                        _ => (),
+                                    },
+                                    Err(_) => (),
+                                }
+                            } else {
+                                send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
+                                    ResponseDataPacket::GetRegisteredNodeAddrAndCert(Err(format!(
+                                        "没有找到叫[{}]的节点等待连接",
+                                        node_name
+                                    ))),
+                                ))?)
+                                .await?;
+                                send.finish().await?;
+                            }
+                        }
+                        _ => (),
                     },
                     Err(err) => {
                         println!(
@@ -93,14 +143,14 @@ async fn main() -> Result<()> {
                             connection.remote_address(),
                             err
                         );
-                        let mut online_node = online_node.lock().await;
-                        for i in 0..online_node.len() {
-                            if online_node[i].id == connection.stable_id() {
-                                online_node.remove(i);
-                            }
-                        }
                         break;
                     }
+                }
+            }
+            let mut node_list = node_list.lock().await;
+            for i in 0..node_list.len() {
+                if node_list[i].connection.stable_id() == connection.stable_id() {
+                    node_list.remove(i);
                 }
             }
             anyhow::Ok(())

@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+node-network = { path = "../" }
+
 anyhow = "1.0.80"                                   #错误处理
 tokio = { version = "1.36.0", features = ["full"] } #异步运行时
 clap = { version = "4.5.2", features = ["derive"] } #命令行参数解析
 
-quinn = "0.10.2"                                       #QUIC协议
-rustls = "0.21.10"                                     #TLS加密
-serde = { version = "1.0.197", features = ["derive"] } #序列化
-rmp-serde = "1.1.2"                                    #MessagePack
+quinn = "0.10.2"    #QUIC协议
+rustls = "0.21.10"  #TLS加密
+rmp-serde = "1.1.2" #MessagePack序列化
