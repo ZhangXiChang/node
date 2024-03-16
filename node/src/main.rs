@@ -9,7 +9,7 @@ use std::{
 use anyhow::Result;
 use clap::Parser;
 use node_network::{DataPacket, RequestDataPacket, ResponseDataPacket};
-use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
+use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
 
 #[derive(Parser)]
 struct CLIArgs {
@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
                 if let Some(connecting) = endpoint.accept().await {
                     let connection = connecting.await?;
                     println!("[{}]节点连接成功", connection.remote_address());
+                    chat(connection).await?;
                 }
             }
             "get-node-list" => {
@@ -176,8 +177,9 @@ async fn main() -> Result<()> {
                                 )?
                                 .await
                             {
-                                Ok(_connection) => {
+                                Ok(connection) => {
                                     println!("节点连接成功");
+                                    chat(connection).await?;
                                 }
                                 Err(err) => {
                                     println!("节点连接失败，原因：{}", err);
@@ -191,6 +193,38 @@ async fn main() -> Result<()> {
             }
             _ => println!("没有[{}]这样的命令", stdin_str),
         }
+    }
+    Ok(())
+}
+async fn chat(connection: Connection) -> Result<()> {
+    tokio::spawn({
+        let connection = connection.clone();
+        async move {
+            loop {
+                if false {
+                    break;
+                }
+                let mut recv = connection.accept_uni().await?;
+                println!(
+                    "[{}]：{}",
+                    connection.remote_address(),
+                    String::from_utf8(recv.read_to_end(usize::MAX).await?)?
+                );
+            }
+            anyhow::Ok(())
+        }
+    });
+    println!("[开始聊天吧]");
+    loop {
+        if false {
+            break;
+        }
+        let mut stdin_str = String::new();
+        stdin().read_line(&mut stdin_str)?;
+        let stdin_str = stdin_str.trim_end();
+        let mut send = connection.open_uni().await?;
+        send.write_all(stdin_str.as_bytes()).await?;
+        send.finish().await?;
     }
     Ok(())
 }
