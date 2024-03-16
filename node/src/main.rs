@@ -8,8 +8,8 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use node_network::{DataPacket, RequestDataPacket, ResponseDataPacket};
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
+use types::{DataPacket, RequestDataPacket, ResponseDataPacket};
 
 #[derive(Parser)]
 struct CLIArgs {

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-node-network = { path = "../" }
+types = { path = "../types" }
 
 anyhow = "1.0.80"                                   #错误处理
 tokio = { version = "1.36.0", features = ["full"] } #异步运行时

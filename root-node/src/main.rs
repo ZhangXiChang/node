@@ -2,9 +2,9 @@ use std::{fs::File, io::Read, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
-use node_network::{DataPacket, NodeAddrAndCert, RequestDataPacket, ResponseDataPacket};
 use quinn::{Connection, Endpoint, ServerConfig, TransportConfig};
 use tokio::sync::Mutex;
+use types::{DataPacket, NodeAddrAndCert, RequestDataPacket, ResponseDataPacket};
 
 #[derive(Parser)]
 struct CLIArgs {
