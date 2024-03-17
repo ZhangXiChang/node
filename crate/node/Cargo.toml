@@ -3,6 +3,10 @@ name = "node"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+anyhow = "1.0.80"  #错误处理
+fl2rust = "0.5.19" #fl代码转rs代码
+
 [dependencies]
 types = { path = "../types" }
 
@@ -14,3 +18,5 @@ quinn = "0.10.2"    #QUIC协议
 rustls = "0.21.10"  #TLS加密
 rcgen = "0.12.1"    #自签名X.509证书生成
 rmp-serde = "1.1.2" #MessagePack序列化
+
+fltk = "1.4.26"
