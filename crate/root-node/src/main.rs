@@ -3,8 +3,8 @@ use std::{fs::File, io::Read, sync::Arc, time::Duration};
 use anyhow::Result;
 use clap::Parser;
 use quinn::{Connection, Endpoint, ServerConfig, TransportConfig};
+use share::{DataPacket, NodeIPAddrAndCert, RequestDataPacket, ResponseDataPacket};
 use tokio::sync::Mutex;
-use types::{DataPacket, NodeAddrAndCert, RequestDataPacket, ResponseDataPacket};
 
 #[derive(Parser)]
 struct CLIArgs {
@@ -18,8 +18,8 @@ struct CLIArgs {
 
 struct Node {
     name: String,
-    connection: Connection,
     cert: Vec<u8>,
+    connection: Connection,
 }
 
 #[tokio::main]
@@ -56,49 +56,49 @@ async fn main() -> Result<()> {
                     Ok((mut send, mut recv)) => match rmp_serde::from_slice::<DataPacket>(
                         &recv.read_to_end(usize::MAX).await?,
                     )? {
-                        DataPacket::Request(RequestDataPacket::GetNodeInfo) => {
+                        DataPacket::Request(RequestDataPacket::GetRootNodeInfo) => {
                             send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
-                                ResponseDataPacket::GetNodeInfo {
-                                    node_name: "北方通信".to_string(),
-                                    node_description: "这是一个根节点的描述".to_string(),
+                                ResponseDataPacket::GetRootNodeInfo {
+                                    root_node_name: "北方通信".to_string(),
+                                    root_node_description: "这是一个根节点的描述".to_string(),
                                 },
                             ))?)
                             .await?;
                             send.finish().await?;
                         }
-                        DataPacket::RegisterNode {
-                            node_name,
-                            node_cert,
-                        } => {
+                        DataPacket::RegisterNode { node_name, cert } => {
                             let mut register_node_list = register_node_list.lock().await;
                             register_node_list.push(Node {
                                 name: node_name,
+                                cert: cert,
                                 connection: connection.clone(),
-                                cert: node_cert,
                             });
                         }
-                        DataPacket::Request(RequestDataPacket::GetRegisteredNodeNameList) => {
-                            let register_node_list = register_node_list.lock().await;
-                            let mut registered_node_name_list = Vec::new();
-                            for register_node in register_node_list.iter() {
-                                registered_node_name_list.push(register_node.name.clone());
+                        DataPacket::Request(RequestDataPacket::GetAllRegisteredNodeName) => {
+                            let mut all_registered_node_name = Vec::new();
+                            {
+                                let register_node_list = register_node_list.lock().await;
+                                for register_node in register_node_list.iter() {
+                                    all_registered_node_name.push(register_node.name.clone());
+                                }
                             }
                             send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
-                                ResponseDataPacket::GetRegisteredNodeNameList {
-                                    registered_node_name_list,
+                                ResponseDataPacket::GetAllRegisteredNodeName {
+                                    all_registered_node_name,
                                 },
                             ))?)
                             .await?;
                             send.finish().await?;
                         }
-                        DataPacket::Request(RequestDataPacket::GetRegisteredNodeAddrAndCert {
-                            node_name,
-                        }) => {
-                            let register_node_list = register_node_list.lock().await;
+                        DataPacket::Request(
+                            RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
+                        ) => {
                             let mut node = None;
+                            let register_node_list = register_node_list.lock().await;
                             for i in register_node_list.iter() {
                                 if i.name == node_name {
                                     node = Some(i);
+                                    break;
                                 }
                             }
                             if let Some(node) = node {
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
                                 node_send
                                     .write_all(&rmp_serde::to_vec(&DataPacket::Request(
                                         RequestDataPacket::HolePunching {
-                                            addr: connection.remote_address(),
+                                            ip_addr: connection.remote_address(),
                                         },
                                     ))?)
                                     .await?;
@@ -116,16 +116,16 @@ async fn main() -> Result<()> {
                                         &node_recv.read_to_end(usize::MAX).await?,
                                     )? {
                                         DataPacket::Response(ResponseDataPacket::HolePunching) => {
-                                            let node_addr_and_cert = DataPacket::Response(
-                                                ResponseDataPacket::GetRegisteredNodeAddrAndCert(
-                                                    Ok(NodeAddrAndCert {
-                                                        addr: node.connection.remote_address(),
+                                            let node_ip_addr_and_cert = DataPacket::Response(
+                                                ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(
+                                                    Some(NodeIPAddrAndCert {
+                                                        ip_addr: node.connection.remote_address(),
                                                         cert: node.cert.clone(),
                                                     }),
                                                 ),
                                             );
                                             send.write_all(&rmp_serde::to_vec(
-                                                &node_addr_and_cert,
+                                                &node_ip_addr_and_cert,
                                             )?)
                                             .await?;
                                             send.finish().await?;
@@ -136,10 +136,7 @@ async fn main() -> Result<()> {
                                 }
                             } else {
                                 send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
-                                    ResponseDataPacket::GetRegisteredNodeAddrAndCert(Err(format!(
-                                        "没有找到叫[{}]的节点等待连接",
-                                        node_name
-                                    ))),
+                                    ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(None),
                                 ))?)
                                 .await?;
                                 send.finish().await?;

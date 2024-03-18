@@ -21,13 +21,12 @@ use ratatui::{
     Terminal,
 };
 use serde::{Deserialize, Serialize};
-use types::{DataPacket, RequestDataPacket, ResponseDataPacket};
+use share::{x509_dns_name_from_der, DataPacket, RequestDataPacket, ResponseDataPacket};
 
 enum Focus {
     MenuBar,
     ChatBar,
 }
-
 enum MenuBarState {
     MainMenu,
 }
@@ -44,7 +43,7 @@ struct RootNodeConfig {
 }
 #[derive(Serialize, Deserialize)]
 struct Config {
-    you_name: String,
+    node_name: String,
     dns_name: String,
     root_node_config: RootNodeConfig,
 }
@@ -70,6 +69,8 @@ struct MessageBar {
 struct App {
     endpoint: Endpoint,
     root_node_connection: Connection,
+    node_name: String,
+    cert: Vec<u8>,
     focus: Focus,
     title_bar: TitleBar,
     menu_bar: MenuBar,
@@ -82,7 +83,7 @@ impl App {
         let cert_dir_path = PathBuf::from("./certs");
         //解析配置文件
         let mut config = Config {
-            you_name: "无名氏".to_string(),
+            node_name: "无名氏".to_string(),
             dns_name: "node".to_string(),
             root_node_config: RootNodeConfig {
                 ip_addr: "47.122.9.167:10270".to_string(),
@@ -143,24 +144,26 @@ impl App {
         //获取根节点信息
         let (mut send, mut recv) = root_node_connection.open_bi().await?;
         send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
-            RequestDataPacket::GetNodeInfo,
+            RequestDataPacket::GetRootNodeInfo,
         ))?)
         .await?;
         send.finish().await?;
-        let (node_name, node_description) =
+        let (root_node_name, root_node_description) =
             match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
-                DataPacket::Response(ResponseDataPacket::GetNodeInfo {
-                    node_name,
-                    node_description,
-                }) => (node_name, node_description),
+                DataPacket::Response(ResponseDataPacket::GetRootNodeInfo {
+                    root_node_name,
+                    root_node_description,
+                }) => (root_node_name, root_node_description),
                 _ => return Err(anyhow!("服务端返回了预料之外的数据包")),
             };
         Ok(Self {
             endpoint,
             root_node_connection,
+            node_name: config.node_name,
+            cert: certificate.serialize_der()?,
             focus: Focus::MenuBar,
             title_bar: TitleBar {
-                title: format!("欢迎使用节点网络，根节点[{}]为您服务", node_name),
+                title: format!("欢迎使用节点网络，根节点[{}]为您服务", root_node_name),
             },
             menu_bar: MenuBar {
                 title: "主菜单".to_string(),
@@ -174,12 +177,12 @@ impl App {
             },
             message_bar: MessageBar {
                 title: "消息栏".to_string(),
-                items: vec![format!("[{}]：{}", node_name, node_description)],
+                items: vec![format!("[{}]：{}", root_node_name, root_node_description)],
                 ..Default::default()
             },
         })
     }
-    fn run(mut self) -> Result<()> {
+    async fn run(mut self) -> Result<()> {
         //终端界面
         stdout().execute(EnterAlternateScreen)?;
         enable_raw_mode()?;
@@ -261,8 +264,8 @@ impl App {
                                 KeyCode::Enter => {
                                     if let Some(index) = self.menu_bar.items_state.selected() {
                                         match index {
-                                            0 => (),
-                                            1 => (),
+                                            0 => self.accept_connect().await?,
+                                            1 => self.connect().await?,
                                             2 => quit = true,
                                             _ => (),
                                         }
@@ -294,10 +297,92 @@ impl App {
         stdout().execute(LeaveAlternateScreen)?;
         Ok(())
     }
+    async fn accept_connect(&mut self) -> Result<()> {
+        //注册节点
+        let (mut send, _) = self.root_node_connection.open_bi().await?;
+        send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
+            node_name: self.node_name.clone(),
+            cert: self.cert.clone(),
+        })?)
+        .await?;
+        send.finish().await?;
+        //接收打洞信号
+        tokio::spawn({
+            let endpoint = self.endpoint.clone();
+            let root_node_connection = self.root_node_connection.clone();
+            async move {
+                match rmp_serde::from_slice::<DataPacket>(
+                    &root_node_connection
+                        .accept_uni()
+                        .await?
+                        .read_to_end(usize::MAX)
+                        .await?,
+                )? {
+                    DataPacket::Request(RequestDataPacket::HolePunching { ip_addr }) => {
+                        let _ = endpoint.connect(ip_addr, "_")?.await;
+                        let mut send = root_node_connection.open_uni().await?;
+                        send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
+                            ResponseDataPacket::HolePunching,
+                        ))?)
+                        .await?;
+                        send.finish().await?;
+                    }
+                    _ => (),
+                }
+                anyhow::Ok(())
+            }
+        });
+        //接收连接
+        self.message_bar.items.insert(0, "等待连接...".to_string());
+        if let Some(connecting) = self.endpoint.accept().await {
+            let connection = connecting.await?;
+            self.message_bar
+                .items
+                .insert(0, format!("[{}]连接成功", connection.remote_address()));
+        }
+        Ok(())
+    }
+    async fn connect(&mut self) -> Result<()> {
+        //从根节点获取用于连接的节点地址与证书
+        let (mut send, mut recv) = self.root_node_connection.open_bi().await?;
+        send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+            RequestDataPacket::GetRegisteredNodeIPAddrAndCert {
+                node_name: "无名氏".to_string(),
+            },
+        ))?)
+        .await?;
+        send.finish().await?;
+        match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
+            DataPacket::Response(ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(Some(
+                node_addr_and_cert,
+            ))) => {
+                //连接节点
+                let mut node_cert_store = rustls::RootCertStore::empty();
+                node_cert_store.add(&rustls::Certificate(node_addr_and_cert.cert.clone()))?;
+                match self
+                    .endpoint
+                    .connect_with(
+                        ClientConfig::with_root_certificates(node_cert_store),
+                        node_addr_and_cert.ip_addr,
+                        &x509_dns_name_from_der(&node_addr_and_cert.cert)?,
+                    )?
+                    .await
+                {
+                    Ok(_connection) => self.message_bar.items.insert(0, "节点连接成功".to_string()),
+                    Err(err) => self
+                        .message_bar
+                        .items
+                        .insert(0, format!("节点连接失败，原因：{}", err)),
+                };
+            }
+            _ => self.message_bar.items.insert(0, "没有找到节点".to_string()),
+        }
+        Ok(())
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    App::new().await?.run()?;
+    App::new().await?.run().await?;
     Ok(())
 }
