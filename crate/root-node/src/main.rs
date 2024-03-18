@@ -43,10 +43,10 @@ async fn main() -> Result<()> {
     )?;
     println!("根节点创建成功");
     //注册的节点列表
-    let node_list = Arc::new(Mutex::new(Vec::new()));
+    let register_node_list = Arc::new(Mutex::new(Vec::new()));
     //接收连接
     while let Some(connecting) = endpoint.accept().await {
-        let node_list = node_list.clone();
+        let register_node_list = register_node_list.clone();
         tokio::spawn(async move {
             let connection = connecting.await?;
             println!("[{}]节点连接成功", connection.remote_address());
@@ -56,22 +56,32 @@ async fn main() -> Result<()> {
                     Ok((mut send, mut recv)) => match rmp_serde::from_slice::<DataPacket>(
                         &recv.read_to_end(usize::MAX).await?,
                     )? {
+                        DataPacket::Request(RequestDataPacket::GetNodeInfo) => {
+                            send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
+                                ResponseDataPacket::GetNodeInfo {
+                                    node_name: "北方通信".to_string(),
+                                    node_description: "这是一个根节点的描述".to_string(),
+                                },
+                            ))?)
+                            .await?;
+                            send.finish().await?;
+                        }
                         DataPacket::RegisterNode {
                             node_name,
                             node_cert,
                         } => {
-                            let mut node_list = node_list.lock().await;
-                            node_list.push(Node {
+                            let mut register_node_list = register_node_list.lock().await;
+                            register_node_list.push(Node {
                                 name: node_name,
                                 connection: connection.clone(),
                                 cert: node_cert,
                             });
                         }
                         DataPacket::Request(RequestDataPacket::GetRegisteredNodeNameList) => {
-                            let node_list = node_list.lock().await;
+                            let register_node_list = register_node_list.lock().await;
                             let mut registered_node_name_list = Vec::new();
-                            for node in node_list.iter() {
-                                registered_node_name_list.push(node.name.clone());
+                            for register_node in register_node_list.iter() {
+                                registered_node_name_list.push(register_node.name.clone());
                             }
                             send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
                                 ResponseDataPacket::GetRegisteredNodeNameList {
@@ -84,9 +94,9 @@ async fn main() -> Result<()> {
                         DataPacket::Request(RequestDataPacket::GetRegisteredNodeAddrAndCert {
                             node_name,
                         }) => {
-                            let node_list = node_list.lock().await;
+                            let register_node_list = register_node_list.lock().await;
                             let mut node = None;
-                            for i in node_list.iter() {
+                            for i in register_node_list.iter() {
                                 if i.name == node_name {
                                     node = Some(i);
                                 }
@@ -147,10 +157,10 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let mut node_list = node_list.lock().await;
-            for i in 0..node_list.len() {
-                if node_list[i].connection.stable_id() == connection.stable_id() {
-                    node_list.remove(i);
+            let mut register_node_list = register_node_list.lock().await;
+            for i in 0..register_node_list.len() {
+                if register_node_list[i].connection.stable_id() == connection.stable_id() {
+                    register_node_list.remove(i);
                 }
             }
             anyhow::Ok(())

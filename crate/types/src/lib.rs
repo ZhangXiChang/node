@@ -13,12 +13,17 @@ pub enum DataPacket {
 }
 #[derive(Serialize, Deserialize)]
 pub enum RequestDataPacket {
+    GetNodeInfo,
     GetRegisteredNodeNameList,
     GetRegisteredNodeAddrAndCert { node_name: String },
     HolePunching { addr: SocketAddr },
 }
 #[derive(Serialize, Deserialize)]
 pub enum ResponseDataPacket {
+    GetNodeInfo {
+        node_name: String,
+        node_description: String,
+    },
     GetRegisteredNodeNameList {
         registered_node_name_list: Vec<String>,
     },

@@ -1,11 +1,18 @@
-use std::{io::stdout, time::Duration};
+use std::{
+    fs::File,
+    io::{stdout, Read},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
+use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout},
@@ -14,6 +21,7 @@ use ratatui::{
     Terminal,
 };
 use serde::{Deserialize, Serialize};
+use types::{DataPacket, RequestDataPacket, ResponseDataPacket};
 
 enum Focus {
     MenuBar,
@@ -33,13 +41,12 @@ impl Default for MenuBarState {
 struct RootNodeConfig {
     ip_addr: String,
     dns_name: String,
-    cert_file_name: String,
-    default_connect: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct Config {
     you_name: String,
-    root_node_list: Vec<RootNodeConfig>,
+    dns_name: String,
+    root_node_config: RootNodeConfig,
 }
 
 #[derive(Default)]
@@ -61,17 +68,99 @@ struct MessageBar {
     items: Vec<String>,
 }
 struct App {
+    endpoint: Endpoint,
+    root_node_connection: Connection,
     focus: Focus,
     title_bar: TitleBar,
     menu_bar: MenuBar,
     message_bar: MessageBar,
 }
 impl App {
-    fn new() -> Self {
-        Self {
+    async fn new() -> Result<Self> {
+        //设置路径
+        let config_file_path = PathBuf::from("./config.json");
+        let cert_dir_path = PathBuf::from("./certs");
+        //解析配置文件
+        let mut config = Config {
+            you_name: "无名氏".to_string(),
+            dns_name: "node".to_string(),
+            root_node_config: RootNodeConfig {
+                ip_addr: "47.122.9.167:10270".to_string(),
+                dns_name: "north".to_string(),
+            },
+        };
+        match File::open(config_file_path.clone()) {
+            Ok(mut config_file) => {
+                let mut config_bytes = Vec::new();
+                config_file.read_to_end(&mut config_bytes)?;
+                config = serde_json::from_slice(&config_bytes)?;
+            }
+            Err(_) => {
+                config.serialize(&mut serde_json::Serializer::with_formatter(
+                    File::create(config_file_path)?,
+                    serde_json::ser::PrettyFormatter::with_indent(b"    "),
+                ))?;
+            }
+        }
+        //创建证书
+        let certificate =
+            rcgen::Certificate::from_params(rcgen::CertificateParams::new(vec![config.dns_name]))?;
+        //创建节点
+        let mut transport_config = TransportConfig::default();
+        transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+        let mut endpoint = Endpoint::server(
+            ServerConfig::with_single_cert(
+                vec![rustls::Certificate(certificate.serialize_der()?)],
+                rustls::PrivateKey(certificate.serialize_private_key_der()),
+            )?
+            .transport_config(Arc::new(transport_config))
+            .clone(),
+            "0.0.0.0:0".parse()?,
+        )?;
+        //加载根节点证书设置为默认信任证书
+        let mut root_node_cert_store = rustls::RootCertStore::empty();
+        for dir_entry in cert_dir_path.read_dir()? {
+            if let Ok(dir_entry) = dir_entry {
+                let path = dir_entry.path();
+                if let Some(extension) = path.extension() {
+                    if extension == "cer" {
+                        let mut root_node_cert = Vec::new();
+                        File::open(path)?.read_to_end(&mut root_node_cert)?;
+                        root_node_cert_store.add(&rustls::Certificate(root_node_cert))?;
+                    }
+                }
+            }
+        }
+        endpoint
+            .set_default_client_config(ClientConfig::with_root_certificates(root_node_cert_store));
+        //连接根节点
+        let root_node_connection = endpoint
+            .connect(
+                config.root_node_config.ip_addr.parse()?,
+                &config.root_node_config.dns_name,
+            )?
+            .await?;
+        //获取根节点信息
+        let (mut send, mut recv) = root_node_connection.open_bi().await?;
+        send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+            RequestDataPacket::GetNodeInfo,
+        ))?)
+        .await?;
+        send.finish().await?;
+        let (node_name, node_description) =
+            match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
+                DataPacket::Response(ResponseDataPacket::GetNodeInfo {
+                    node_name,
+                    node_description,
+                }) => (node_name, node_description),
+                _ => return Err(anyhow!("服务端返回了预料之外的数据包")),
+            };
+        Ok(Self {
+            endpoint,
+            root_node_connection,
             focus: Focus::MenuBar,
             title_bar: TitleBar {
-                title: "欢迎使用节点网络，根节点[北方通信]为您服务".to_string(),
+                title: format!("欢迎使用节点网络，根节点[{}]为您服务", node_name),
             },
             menu_bar: MenuBar {
                 title: "主菜单".to_string(),
@@ -85,9 +174,10 @@ impl App {
             },
             message_bar: MessageBar {
                 title: "消息栏".to_string(),
+                items: vec![format!("[{}]：{}", node_name, node_description)],
                 ..Default::default()
             },
-        }
+        })
     }
     fn run(mut self) -> Result<()> {
         //终端界面
@@ -208,81 +298,6 @@ impl App {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    App::new().run()?;
+    App::new().await?.run()?;
     Ok(())
-    // //设置路径
-    // let config_file_path = PathBuf::from("./config.json");
-    // let cert_dir_path = PathBuf::from("./certs");
-    // //解析配置文件
-    // let mut config = Config {
-    //     you_name: "无名氏".to_string(),
-    //     root_node_list: vec![RootNodeConfig {
-    //         ip_addr: "47.122.9.167:10270".to_string(),
-    //         dns_name: "root_node".to_string(),
-    //         cert_file_name: "root_node".to_string(),
-    //         default_connect: true,
-    //     }],
-    // };
-    // match File::open(config_file_path.clone()) {
-    //     Ok(mut config_file) => {
-    //         let mut config_bytes = Vec::new();
-    //         config_file.read_to_end(&mut config_bytes)?;
-    //         config = serde_json::from_slice(&config_bytes)?;
-    //     }
-    //     Err(_) => {
-    //         config.serialize(&mut serde_json::Serializer::with_formatter(
-    //             File::create(config_file_path)?,
-    //             serde_json::ser::PrettyFormatter::with_indent(b"    "),
-    //         ))?;
-    //     }
-    // }
-    // //创建证书
-    // let certificate =
-    //     rcgen::Certificate::from_params(rcgen::CertificateParams::new(vec!["node".to_string()]))?;
-    // //创建节点
-    // let mut transport_config = TransportConfig::default();
-    // transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
-    // let mut endpoint = Endpoint::server(
-    //     ServerConfig::with_single_cert(
-    //         vec![rustls::Certificate(certificate.serialize_der()?)],
-    //         rustls::PrivateKey(certificate.serialize_private_key_der()),
-    //     )?
-    //     .transport_config(Arc::new(transport_config))
-    //     .clone(),
-    //     "0.0.0.0:0".parse()?,
-    // )?;
-    // //加载根节点证书设置为默认信任证书
-    // let mut default_connect_root_node = None;
-    // let mut root_node_cert_store = rustls::RootCertStore::empty();
-    // for root_node_config in config.root_node_list {
-    //     let mut root_node_cert = Vec::new();
-    //     match File::open(cert_dir_path.join(root_node_config.cert_file_name.clone() + ".cer")) {
-    //         Ok(mut cert_file) => {
-    //             cert_file.read_to_end(&mut root_node_cert)?;
-    //         }
-    //         Err(_) => {
-    //             return Err(anyhow!(
-    //                 "证书[{}]不存在",
-    //                 root_node_config.cert_file_name.clone()
-    //             ))
-    //         }
-    //     }
-    //     root_node_cert_store.add(&rustls::Certificate(root_node_cert))?;
-    //     if root_node_config.default_connect && default_connect_root_node.is_none() {
-    //         default_connect_root_node = Some(root_node_config);
-    //     }
-    // }
-    // endpoint.set_default_client_config(ClientConfig::with_root_certificates(root_node_cert_store));
-    // //连接根节点
-    // let root_node_connection;
-    // if let Some(root_node_config) = default_connect_root_node {
-    //     root_node_connection = endpoint
-    //         .connect(
-    //             root_node_config.ip_addr.parse()?,
-    //             &root_node_config.dns_name,
-    //         )?
-    //         .await?;
-    // } else {
-    //     return Err(anyhow!("没有默认连接的根节点"));
-    // }
 }
