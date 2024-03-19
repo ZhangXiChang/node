@@ -23,10 +23,11 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use share::{x509_dns_name_from_der, DataPacket, RequestDataPacket, ResponseDataPacket};
 use tokio::sync::Mutex;
+use tui_textarea::{CursorMove, TextArea};
 
 enum Focus {
     MenuBar,
-    ChatBar,
+    MessageBar,
 }
 enum MenuBarState {
     UndefinedMenu,
@@ -61,18 +62,19 @@ struct MessageBar {
     title_modifier: Modifier,
     items: Vec<String>,
 }
-struct App {
+struct App<'a> {
     focus: Focus,
     title_bar: TitleBar,
     menu_bar: MenuBar,
     message_bar: MessageBar,
+    text_input_bar: TextArea<'a>,
     endpoint: Endpoint,
     root_node_connection: Connection,
     node_name: String,
     cert: Vec<u8>,
     node_connection: Arc<Mutex<Option<Connection>>>,
 }
-impl App {
+impl<'a> App<'a> {
     async fn new() -> Result<Self> {
         //设置路径
         let config_file_path = PathBuf::from("./config.json");
@@ -153,10 +155,6 @@ impl App {
                 _ => return Err(anyhow!("服务端返回了预料之外的数据包")),
             };
         Ok(Self {
-            endpoint,
-            root_node_connection,
-            node_name: config.node_name,
-            cert: certificate.serialize_der()?,
             focus: Focus::MenuBar,
             title_bar: TitleBar {
                 title: format!("欢迎使用节点网络，根节点[{}]为您服务", root_node_name),
@@ -171,16 +169,26 @@ impl App {
                 ],
                 state: MenuBarState::MainMenu,
                 items_state: {
-                    let mut list_state = ListState::default();
-                    list_state.select(Some(0));
-                    list_state
+                    let mut items_state = ListState::default();
+                    items_state.select(Some(0));
+                    items_state
                 },
             },
             message_bar: MessageBar {
                 title: "消息栏".to_string(),
                 title_modifier: Modifier::default(),
-                items: vec![format!("[{}]：{}", root_node_name, root_node_description)],
+                items: vec![format!("{}：{}", root_node_name, root_node_description)],
             },
+            text_input_bar: {
+                let mut text_input_bar = TextArea::default();
+                text_input_bar.set_cursor_line_style(Style::default());
+                text_input_bar.set_block(Block::new().borders(Borders::ALL));
+                text_input_bar
+            },
+            endpoint,
+            root_node_connection,
+            node_name: config.node_name,
+            cert: certificate.serialize_der()?,
             node_connection: Arc::new(Mutex::new(None)),
         })
     }
@@ -192,7 +200,7 @@ impl App {
         let mut quit = false;
         while !quit {
             terminal.draw(|frame| {
-                let [title_area, menu_area] =
+                let [title_area, interactive_area] =
                     Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
                         .areas(frame.size());
                 frame.render_widget(
@@ -203,7 +211,7 @@ impl App {
                 );
                 let [menu_area, chat_area] =
                     Layout::horizontal([Constraint::Length(20), Constraint::Min(0)])
-                        .areas(menu_area);
+                        .areas(interactive_area);
                 frame.render_stateful_widget(
                     List::new(self.menu_bar.items.clone())
                         .block(
@@ -219,6 +227,8 @@ impl App {
                     menu_area,
                     &mut self.menu_bar.items_state,
                 );
+                let [message_area, text_input_area] =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(chat_area);
                 frame.render_widget(
                     List::new(self.message_bar.items.clone())
                         .direction(ListDirection::BottomToTop)
@@ -230,8 +240,9 @@ impl App {
                                     .add_modifier(self.message_bar.title_modifier),
                             ),
                         ),
-                    chat_area,
+                    message_area,
                 );
+                frame.render_widget(self.text_input_bar.widget(), text_input_area);
             })?;
             if event::poll(Duration::ZERO)? {
                 match event::read()? {
@@ -287,17 +298,38 @@ impl App {
                                     }
                                 },
                                 KeyCode::Tab => {
-                                    self.focus = Focus::ChatBar;
+                                    self.focus = Focus::MessageBar;
                                     self.menu_bar.title_modifier = Modifier::default();
                                     self.message_bar.title_modifier = Modifier::REVERSED;
                                 }
                                 _ => (),
                             },
-                            Focus::ChatBar => match key.code {
+                            Focus::MessageBar => match key.code {
                                 KeyCode::Tab => {
                                     self.focus = Focus::MenuBar;
                                     self.message_bar.title_modifier = Modifier::default();
                                     self.menu_bar.title_modifier = Modifier::REVERSED;
+                                }
+                                KeyCode::Char(_) => {
+                                    self.text_input_bar.input(key);
+                                }
+                                KeyCode::Backspace => {
+                                    self.text_input_bar.delete_char();
+                                }
+                                KeyCode::Left => self.text_input_bar.move_cursor(CursorMove::Back),
+                                KeyCode::Right => {
+                                    self.text_input_bar.move_cursor(CursorMove::Forward)
+                                }
+                                KeyCode::Enter => {
+                                    let mut input_text = String::new();
+                                    for lines in self.text_input_bar.lines() {
+                                        input_text.push_str(&lines);
+                                    }
+                                    self.message_bar
+                                        .items
+                                        .insert(0, format!("{}：{}", self.node_name, input_text));
+                                    self.text_input_bar.move_cursor(CursorMove::Head);
+                                    self.text_input_bar.delete_line_by_end();
                                 }
                                 _ => (),
                             },
