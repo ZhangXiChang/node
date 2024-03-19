@@ -66,7 +66,7 @@ struct App<'a> {
     focus: Focus,
     title_bar: TitleBar,
     menu_bar: MenuBar,
-    message_bar: MessageBar,
+    message_bar: Arc<Mutex<MessageBar>>,
     text_input_bar: TextArea<'a>,
     endpoint: Endpoint,
     root_node_connection: Connection,
@@ -174,11 +174,11 @@ impl<'a> App<'a> {
                     items_state
                 },
             },
-            message_bar: MessageBar {
+            message_bar: Arc::new(Mutex::new(MessageBar {
                 title: "消息栏".to_string(),
                 title_modifier: Modifier::default(),
                 items: vec![format!("{}：{}", root_node_name, root_node_description)],
-            },
+            })),
             text_input_bar: {
                 let mut text_input_bar = TextArea::default();
                 text_input_bar.set_cursor_line_style(Style::default());
@@ -199,51 +199,57 @@ impl<'a> App<'a> {
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         let mut quit = false;
         while !quit {
-            terminal.draw(|frame| {
-                let [title_area, interactive_area] =
-                    Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
-                        .areas(frame.size());
-                frame.render_widget(
-                    Paragraph::new(self.title_bar.title.clone())
-                        .block(Block::new().borders(Borders::ALL))
-                        .alignment(Alignment::Center),
-                    title_area,
-                );
-                let [menu_area, chat_area] =
-                    Layout::horizontal([Constraint::Length(20), Constraint::Min(0)])
-                        .areas(interactive_area);
-                frame.render_stateful_widget(
-                    List::new(self.menu_bar.items.clone())
-                        .block(
-                            Block::new().borders(Borders::ALL).title(
-                                self.menu_bar
-                                    .title
-                                    .clone()
-                                    .add_modifier(self.menu_bar.title_modifier),
-                            ),
-                        )
-                        .highlight_style(Style::new().add_modifier(Modifier::BOLD))
-                        .highlight_symbol(">> "),
-                    menu_area,
-                    &mut self.menu_bar.items_state,
-                );
-                let [message_area, text_input_area] =
-                    Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(chat_area);
-                frame.render_widget(
-                    List::new(self.message_bar.items.clone())
-                        .direction(ListDirection::BottomToTop)
-                        .block(
-                            Block::new().borders(Borders::ALL).title(
-                                self.message_bar
-                                    .title
-                                    .clone()
-                                    .add_modifier(self.message_bar.title_modifier),
-                            ),
-                        ),
-                    message_area,
-                );
-                frame.render_widget(self.text_input_bar.widget(), text_input_area);
-            })?;
+            {
+                let message_bar = self.message_bar.lock().await;
+                terminal.draw(|frame| {
+                    let [title_area, interactive_area] =
+                        Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
+                            .areas(frame.size());
+                    frame.render_widget(
+                        Paragraph::new(self.title_bar.title.clone())
+                            .block(Block::new().borders(Borders::ALL))
+                            .alignment(Alignment::Center),
+                        title_area,
+                    );
+                    let [menu_area, chat_area] =
+                        Layout::horizontal([Constraint::Length(20), Constraint::Min(0)])
+                            .areas(interactive_area);
+                    frame.render_stateful_widget(
+                        List::new(self.menu_bar.items.clone())
+                            .block(
+                                Block::new().borders(Borders::ALL).title(
+                                    self.menu_bar
+                                        .title
+                                        .clone()
+                                        .add_modifier(self.menu_bar.title_modifier),
+                                ),
+                            )
+                            .highlight_style(Style::new().add_modifier(Modifier::BOLD))
+                            .highlight_symbol(">> "),
+                        menu_area,
+                        &mut self.menu_bar.items_state,
+                    );
+                    let [message_area, text_input_area] =
+                        Layout::vertical([Constraint::Min(0), Constraint::Length(3)])
+                            .areas(chat_area);
+                    {
+                        frame.render_widget(
+                            List::new(message_bar.items.clone())
+                                .direction(ListDirection::BottomToTop)
+                                .block(
+                                    Block::new().borders(Borders::ALL).title(
+                                        message_bar
+                                            .title
+                                            .clone()
+                                            .add_modifier(message_bar.title_modifier),
+                                    ),
+                                ),
+                            message_area,
+                        );
+                    }
+                    frame.render_widget(self.text_input_bar.widget(), text_input_area);
+                })?;
+            }
             if event::poll(Duration::ZERO)? {
                 match event::read()? {
                     Event::Key(key) => match key.kind {
@@ -300,39 +306,48 @@ impl<'a> App<'a> {
                                 KeyCode::Tab => {
                                     self.focus = Focus::MessageBar;
                                     self.menu_bar.title_modifier = Modifier::default();
-                                    self.message_bar.title_modifier = Modifier::REVERSED;
+                                    self.message_bar.lock().await.title_modifier =
+                                        Modifier::REVERSED;
                                 }
                                 _ => (),
                             },
-                            Focus::MessageBar => match key.code {
-                                KeyCode::Tab => {
-                                    self.focus = Focus::MenuBar;
-                                    self.message_bar.title_modifier = Modifier::default();
-                                    self.menu_bar.title_modifier = Modifier::REVERSED;
-                                }
-                                KeyCode::Char(_) => {
-                                    self.text_input_bar.input(key);
-                                }
-                                KeyCode::Backspace => {
-                                    self.text_input_bar.delete_char();
-                                }
-                                KeyCode::Left => self.text_input_bar.move_cursor(CursorMove::Back),
-                                KeyCode::Right => {
-                                    self.text_input_bar.move_cursor(CursorMove::Forward)
-                                }
-                                KeyCode::Enter => {
-                                    let mut input_text = String::new();
-                                    for lines in self.text_input_bar.lines() {
-                                        input_text.push_str(&lines);
+                            Focus::MessageBar => {
+                                if let Some(_connection) = &*self.node_connection.lock().await {
+                                    match key.code {
+                                        KeyCode::Tab => {
+                                            self.focus = Focus::MenuBar;
+                                            self.message_bar.lock().await.title_modifier =
+                                                Modifier::default();
+                                            self.menu_bar.title_modifier = Modifier::REVERSED;
+                                        }
+                                        KeyCode::Char(_) => {
+                                            self.text_input_bar.input(key);
+                                        }
+                                        KeyCode::Backspace => {
+                                            self.text_input_bar.delete_char();
+                                        }
+                                        KeyCode::Left => {
+                                            self.text_input_bar.move_cursor(CursorMove::Back)
+                                        }
+                                        KeyCode::Right => {
+                                            self.text_input_bar.move_cursor(CursorMove::Forward)
+                                        }
+                                        KeyCode::Enter => {
+                                            let mut input_text = String::new();
+                                            for lines in self.text_input_bar.lines() {
+                                                input_text.push_str(&lines);
+                                            }
+                                            self.message_bar.lock().await.items.insert(
+                                                0,
+                                                format!("{}：{}", self.node_name, input_text),
+                                            );
+                                            self.text_input_bar.move_cursor(CursorMove::Head);
+                                            self.text_input_bar.delete_line_by_end();
+                                        }
+                                        _ => (),
                                     }
-                                    self.message_bar
-                                        .items
-                                        .insert(0, format!("{}：{}", self.node_name, input_text));
-                                    self.text_input_bar.move_cursor(CursorMove::Head);
-                                    self.text_input_bar.delete_line_by_end();
                                 }
-                                _ => (),
-                            },
+                            }
                         },
                         _ => (),
                     },
@@ -390,11 +405,17 @@ impl<'a> App<'a> {
         //接收连接
         tokio::spawn({
             let endpoint = self.endpoint.clone();
+            let message_bar = self.message_bar.clone();
             let node_connection = self.node_connection.clone();
             async move {
                 if let Some(connecting) = endpoint.accept().await {
-                    *node_connection.lock().await = Some(connecting.await?.clone());
-                    println!("连接成功！");
+                    let connection = connecting.await?.clone();
+                    message_bar
+                        .lock()
+                        .await
+                        .items
+                        .insert(0, format!("[{}]连接成功", connection.remote_address()));
+                    *node_connection.lock().await = Some(connection);
                 }
                 anyhow::Ok(())
             }
@@ -443,14 +464,28 @@ impl<'a> App<'a> {
                     )?
                     .await
                 {
-                    Ok(_connection) => self.message_bar.items.insert(0, "节点连接成功".to_string()),
+                    Ok(connection) => {
+                        self.message_bar
+                            .lock()
+                            .await
+                            .items
+                            .insert(0, format!("[{}]连接成功", connection.remote_address()));
+                        *self.node_connection.lock().await = Some(connection);
+                    }
                     Err(err) => self
                         .message_bar
+                        .lock()
+                        .await
                         .items
                         .insert(0, format!("节点连接失败，原因：{}", err)),
                 };
             }
-            _ => self.message_bar.items.insert(0, "没有找到节点".to_string()),
+            _ => self
+                .message_bar
+                .lock()
+                .await
+                .items
+                .insert(0, "没有找到节点".to_string()),
         }
         Ok(())
     }
