@@ -22,18 +22,16 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use share::{x509_dns_name_from_der, DataPacket, RequestDataPacket, ResponseDataPacket};
+use tokio::sync::Mutex;
 
 enum Focus {
     MenuBar,
     ChatBar,
 }
 enum MenuBarState {
+    UndefinedMenu,
     MainMenu,
-}
-impl Default for MenuBarState {
-    fn default() -> Self {
-        Self::MainMenu
-    }
+    NodeListMenu,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,11 +46,9 @@ struct Config {
     root_node_config: RootNodeConfig,
 }
 
-#[derive(Default)]
 struct TitleBar {
     title: String,
 }
-#[derive(Default)]
 struct MenuBar {
     title: String,
     title_modifier: Modifier,
@@ -60,21 +56,21 @@ struct MenuBar {
     state: MenuBarState,
     items_state: ListState,
 }
-#[derive(Default)]
 struct MessageBar {
     title: String,
     title_modifier: Modifier,
     items: Vec<String>,
 }
 struct App {
-    endpoint: Endpoint,
-    root_node_connection: Connection,
-    node_name: String,
-    cert: Vec<u8>,
     focus: Focus,
     title_bar: TitleBar,
     menu_bar: MenuBar,
     message_bar: MessageBar,
+    endpoint: Endpoint,
+    root_node_connection: Connection,
+    node_name: String,
+    cert: Vec<u8>,
+    node_connection: Arc<Mutex<Option<Connection>>>,
 }
 impl App {
     async fn new() -> Result<Self> {
@@ -168,18 +164,24 @@ impl App {
             menu_bar: MenuBar {
                 title: "主菜单".to_string(),
                 title_modifier: Modifier::REVERSED,
+                items: vec![
+                    "接收连接".to_string(),
+                    "主动连接".to_string(),
+                    "退出程序".to_string(),
+                ],
+                state: MenuBarState::MainMenu,
                 items_state: {
                     let mut list_state = ListState::default();
                     list_state.select(Some(0));
                     list_state
                 },
-                ..Default::default()
             },
             message_bar: MessageBar {
                 title: "消息栏".to_string(),
+                title_modifier: Modifier::default(),
                 items: vec![format!("[{}]：{}", root_node_name, root_node_description)],
-                ..Default::default()
             },
+            node_connection: Arc::new(Mutex::new(None)),
         })
     }
     async fn run(mut self) -> Result<()> {
@@ -189,15 +191,6 @@ impl App {
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         let mut quit = false;
         while !quit {
-            match self.menu_bar.state {
-                MenuBarState::MainMenu => {
-                    self.menu_bar.items = vec![
-                        "接收连接".to_string(),
-                        "主动连接".to_string(),
-                        "退出程序".to_string(),
-                    ];
-                }
-            }
             terminal.draw(|frame| {
                 let [title_area, menu_area] =
                     Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
@@ -261,16 +254,38 @@ impl App {
                                         ));
                                     }
                                 }
-                                KeyCode::Enter => {
-                                    if let Some(index) = self.menu_bar.items_state.selected() {
-                                        match index {
-                                            0 => self.accept_connect().await?,
-                                            1 => self.connect().await?,
-                                            2 => quit = true,
-                                            _ => (),
+                                KeyCode::Enter => match self.menu_bar.state {
+                                    MenuBarState::UndefinedMenu => (),
+                                    MenuBarState::MainMenu => {
+                                        if let Some(index) = self.menu_bar.items_state.selected() {
+                                            match index {
+                                                0 => {
+                                                    self.accept_connect().await?;
+                                                    self.menu_bar.state =
+                                                        MenuBarState::UndefinedMenu;
+                                                    self.menu_bar.items =
+                                                        vec!["等待连接...".to_string()];
+                                                    self.menu_bar.items_state.select(Some(0));
+                                                }
+                                                1 => {
+                                                    self.menu_bar.state =
+                                                        MenuBarState::NodeListMenu;
+                                                    self.menu_bar.items =
+                                                        self.get_all_registered_node_name().await?;
+                                                    self.menu_bar.items_state.select(Some(0));
+                                                }
+                                                2 => quit = true,
+                                                _ => (),
+                                            }
                                         }
                                     }
-                                }
+                                    MenuBarState::NodeListMenu => {
+                                        if let Some(index) = self.menu_bar.items_state.selected() {
+                                            self.connect(self.menu_bar.items[index].clone())
+                                                .await?;
+                                        }
+                                    }
+                                },
                                 KeyCode::Tab => {
                                     self.focus = Focus::ChatBar;
                                     self.menu_bar.title_modifier = Modifier::default();
@@ -299,13 +314,21 @@ impl App {
     }
     async fn accept_connect(&mut self) -> Result<()> {
         //注册节点
-        let (mut send, _) = self.root_node_connection.open_bi().await?;
-        send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
-            node_name: self.node_name.clone(),
-            cert: self.cert.clone(),
-        })?)
-        .await?;
-        send.finish().await?;
+        tokio::spawn({
+            let root_node_connection = self.root_node_connection.clone();
+            let node_name = self.node_name.clone();
+            let cert = self.cert.clone();
+            async move {
+                let (mut send, _) = root_node_connection.open_bi().await?;
+                send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
+                    node_name,
+                    cert,
+                })?)
+                .await?;
+                send.finish().await?;
+                anyhow::Ok(())
+            }
+        });
         //接收打洞信号
         tokio::spawn({
             let endpoint = self.endpoint.clone();
@@ -333,22 +356,42 @@ impl App {
             }
         });
         //接收连接
-        self.message_bar.items.insert(0, "等待连接...".to_string());
-        if let Some(connecting) = self.endpoint.accept().await {
-            let connection = connecting.await?;
-            self.message_bar
-                .items
-                .insert(0, format!("[{}]连接成功", connection.remote_address()));
-        }
+        tokio::spawn({
+            let endpoint = self.endpoint.clone();
+            let node_connection = self.node_connection.clone();
+            async move {
+                if let Some(connecting) = endpoint.accept().await {
+                    *node_connection.lock().await = Some(connecting.await?.clone());
+                    println!("连接成功！");
+                }
+                anyhow::Ok(())
+            }
+        });
         Ok(())
     }
-    async fn connect(&mut self) -> Result<()> {
+    async fn get_all_registered_node_name(&mut self) -> Result<Vec<String>> {
+        //从根节点获取注册的节点
+        let (mut send, mut recv) = self.root_node_connection.open_bi().await?;
+        send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+            RequestDataPacket::GetAllRegisteredNodeName,
+        ))?)
+        .await?;
+        send.finish().await?;
+        match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
+            DataPacket::Response(ResponseDataPacket::GetAllRegisteredNodeName {
+                all_registered_node_name,
+            }) => {
+                return Ok(all_registered_node_name);
+            }
+            _ => (),
+        }
+        return Err(anyhow!("从根节点获取全部注册的节点失败"));
+    }
+    async fn connect(&mut self, node_name: String) -> Result<()> {
         //从根节点获取用于连接的节点地址与证书
         let (mut send, mut recv) = self.root_node_connection.open_bi().await?;
         send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
-            RequestDataPacket::GetRegisteredNodeIPAddrAndCert {
-                node_name: "无名氏".to_string(),
-            },
+            RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
         ))?)
         .await?;
         send.finish().await?;
