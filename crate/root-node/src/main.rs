@@ -102,7 +102,8 @@ async fn main() -> Result<()> {
                                 }
                             }
                             if let Some(node) = node {
-                                let mut node_send = node.connection.open_uni().await?;
+                                let (mut node_send, mut node_recv) =
+                                    node.connection.open_bi().await?;
                                 node_send
                                     .write_all(&rmp_serde::to_vec(&DataPacket::Request(
                                         RequestDataPacket::HolePunching {
@@ -111,28 +112,23 @@ async fn main() -> Result<()> {
                                     ))?)
                                     .await?;
                                 node_send.finish().await?;
-                                match node.connection.accept_uni().await {
-                                    Ok(mut node_recv) => match rmp_serde::from_slice::<DataPacket>(
-                                        &node_recv.read_to_end(usize::MAX).await?,
-                                    )? {
-                                        DataPacket::Response(ResponseDataPacket::HolePunching) => {
-                                            let node_ip_addr_and_cert = DataPacket::Response(
-                                                ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(
-                                                    Some(NodeIPAddrAndCert {
-                                                        ip_addr: node.connection.remote_address(),
-                                                        cert: node.cert.clone(),
-                                                    }),
-                                                ),
-                                            );
-                                            send.write_all(&rmp_serde::to_vec(
-                                                &node_ip_addr_and_cert,
-                                            )?)
+                                match rmp_serde::from_slice::<DataPacket>(
+                                    &node_recv.read_to_end(usize::MAX).await?,
+                                )? {
+                                    DataPacket::Response(ResponseDataPacket::HolePunching) => {
+                                        let node_ip_addr_and_cert = DataPacket::Response(
+                                            ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(
+                                                Some(NodeIPAddrAndCert {
+                                                    ip_addr: node.connection.remote_address(),
+                                                    cert: node.cert.clone(),
+                                                }),
+                                            ),
+                                        );
+                                        send.write_all(&rmp_serde::to_vec(&node_ip_addr_and_cert)?)
                                             .await?;
-                                            send.finish().await?;
-                                        }
-                                        _ => (),
-                                    },
-                                    Err(_) => (),
+                                        send.finish().await?;
+                                    }
+                                    _ => (),
                                 }
                             } else {
                                 send.write_all(&rmp_serde::to_vec(&DataPacket::Response(

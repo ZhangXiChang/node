@@ -1,0 +1,8 @@
+{
+    "node_name": "无名氏",
+    "dns_name": "node",
+    "root_node_config": {
+        "ip_addr": "47.122.9.167:10270",
+        "dns_name": "north"
+    }
+}
