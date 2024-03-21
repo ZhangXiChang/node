@@ -1,5 +1,5 @@
 use std::{
-    fs::File,
+    fs::{create_dir_all, File},
     io::{stdout, Read},
     path::PathBuf,
     sync::Arc,
@@ -19,7 +19,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout},
     style::{self, Modifier, Style, Stylize},
     widgets::{Block, Borders, List, ListDirection, ListState, Paragraph},
-    Terminal,
+    Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 use share::{x509_dns_name_from_der, DataPacket, RequestDataPacket, ResponseDataPacket};
@@ -80,14 +80,14 @@ impl<'a> App<'a> {
     async fn new() -> Result<Self> {
         //设置路径
         let config_file_path = PathBuf::from("./config.json");
-        let cert_dir_path = PathBuf::from("./certs");
+        let cert_dir_path = PathBuf::from("./certs/");
         //解析配置文件
         let mut config = Config {
             node_name: "无名氏".to_string(),
             dns_name: "node".to_string(),
             root_node_config: RootNodeConfig {
-                ip_addr: "47.122.9.167:10270".to_string(),
-                dns_name: "north".to_string(),
+                ip_addr: "127.0.0.1:10270".to_string(),
+                dns_name: "local_node".to_string(),
             },
         };
         match File::open(config_file_path.clone()) {
@@ -120,6 +120,7 @@ impl<'a> App<'a> {
         )?;
         //加载根节点证书设置为默认信任证书
         let mut root_node_cert_store = rustls::RootCertStore::empty();
+        create_dir_all(cert_dir_path.clone())?;
         for dir_entry in cert_dir_path.read_dir()? {
             if let Ok(dir_entry) = dir_entry {
                 let path = dir_entry.path();
@@ -131,6 +132,9 @@ impl<'a> App<'a> {
                     }
                 }
             }
+        }
+        if root_node_cert_store.is_empty() {
+            return Err(anyhow!("没有找到证书"));
         }
         endpoint
             .set_default_client_config(ClientConfig::with_root_certificates(root_node_cert_store));
@@ -204,199 +208,193 @@ impl<'a> App<'a> {
         while !quit {
             {
                 terminal.draw(|frame| {
-                    let [title_area, interactive_area] =
-                        Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
-                            .areas(frame.size());
-                    frame.render_widget(
-                        Paragraph::new(self.title_bar.title.clone())
-                            .block(Block::new().borders(Borders::ALL))
-                            .alignment(Alignment::Center),
-                        title_area,
-                    );
-                    let [menu_area, chat_area] =
-                        Layout::horizontal([Constraint::Length(20), Constraint::Min(0)])
-                            .areas(interactive_area);
-
-                    frame.render_stateful_widget(
-                        List::new({
-                            let menu_bar_items = self.menu_bar.read().items.clone();
-                            menu_bar_items
-                        })
-                        .block(Block::new().borders(Borders::ALL).title({
-                            let menu_bar_title = self
-                                .menu_bar
-                                .read()
-                                .title
-                                .clone()
-                                .add_modifier(self.menu_bar.read().title_modifier);
-                            menu_bar_title
-                        }))
-                        .highlight_style(Style::new().add_modifier(Modifier::BOLD))
-                        .highlight_symbol(">> "),
-                        menu_area,
-                        &mut self.menu_bar.write().items_state,
-                    );
-
-                    let [message_area, text_input_area] =
-                        Layout::vertical([Constraint::Min(0), Constraint::Length(3)])
-                            .areas(chat_area);
-                    frame.render_widget(
-                        List::new(self.message_bar.read().items.clone())
-                            .direction(ListDirection::BottomToTop)
-                            .block(
-                                Block::new().borders(Borders::ALL).title(
-                                    self.message_bar
-                                        .read()
-                                        .title
-                                        .clone()
-                                        .add_modifier(self.message_bar.read().title_modifier),
-                                ),
-                            ),
-                        message_area,
-                    );
-                    frame.render_widget(self.text_input_bar.widget(), text_input_area);
+                    self.draw(frame);
                 })?;
+                self.input_handling(&mut quit).await?;
             }
-            if event::poll(Duration::ZERO)? {
-                match event::read()? {
-                    Event::Key(key) => match key.kind {
-                        KeyEventKind::Press => match self.focus {
-                            Focus::MenuBar => match key.code {
-                                KeyCode::Up => {
-                                    if let Some(index) = {
-                                        let selected = self.menu_bar.read().items_state.selected();
-                                        selected
-                                    } {
-                                        self.menu_bar
-                                            .write()
-                                            .items_state
-                                            .select(Some(index.saturating_sub(1)));
-                                    }
-                                }
-                                KeyCode::Down => {
-                                    if let Some(index) = {
-                                        let selected = self.menu_bar.read().items_state.selected();
-                                        selected
-                                    } {
-                                        let menu_bar_items_len = self.menu_bar.read().items.len();
-                                        self.menu_bar.write().items_state.select(Some(
-                                            index
-                                                .saturating_add(1)
-                                                .clamp(0, menu_bar_items_len - 1),
-                                        ));
-                                    }
-                                }
-                                KeyCode::Enter => match {
-                                    let state = self.menu_bar.read().state;
-                                    state
+            if event::poll(Duration::ZERO)? {}
+        }
+        disable_raw_mode()?;
+        stdout().execute(LeaveAlternateScreen)?;
+        Ok(())
+    }
+    fn draw(&mut self, frame: &mut Frame) {
+        let [title_area, interactive_area] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(frame.size());
+        frame.render_widget(
+            Paragraph::new(self.title_bar.title.clone())
+                .block(Block::new().borders(Borders::ALL))
+                .alignment(Alignment::Center),
+            title_area,
+        );
+        let [menu_area, chat_area] =
+            Layout::horizontal([Constraint::Length(20), Constraint::Min(0)])
+                .areas(interactive_area);
+
+        frame.render_stateful_widget(
+            List::new({
+                let menu_bar_items = self.menu_bar.read().items.clone();
+                menu_bar_items
+            })
+            .block(Block::new().borders(Borders::ALL).title({
+                let menu_bar_title = self
+                    .menu_bar
+                    .read()
+                    .title
+                    .clone()
+                    .add_modifier(self.menu_bar.read().title_modifier);
+                menu_bar_title
+            }))
+            .highlight_style(Style::new().add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> "),
+            menu_area,
+            &mut self.menu_bar.write().items_state,
+        );
+
+        let [message_area, text_input_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(chat_area);
+        frame.render_widget(
+            List::new(self.message_bar.read().items.clone())
+                .direction(ListDirection::BottomToTop)
+                .block(
+                    Block::new().borders(Borders::ALL).title(
+                        self.message_bar
+                            .read()
+                            .title
+                            .clone()
+                            .add_modifier(self.message_bar.read().title_modifier),
+                    ),
+                ),
+            message_area,
+        );
+        frame.render_widget(self.text_input_bar.widget(), text_input_area);
+    }
+    async fn input_handling(&mut self, quit: &mut bool) -> Result<()> {
+        match event::read()? {
+            Event::Key(key) => match key.kind {
+                KeyEventKind::Press => match self.focus {
+                    Focus::MenuBar => match key.code {
+                        KeyCode::Up => {
+                            if let Some(index) = {
+                                let selected = self.menu_bar.read().items_state.selected();
+                                selected
+                            } {
+                                self.menu_bar
+                                    .write()
+                                    .items_state
+                                    .select(Some(index.saturating_sub(1)));
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(index) = {
+                                let selected = self.menu_bar.read().items_state.selected();
+                                selected
+                            } {
+                                let menu_bar_items_len = self.menu_bar.read().items.len();
+                                self.menu_bar.write().items_state.select(Some(
+                                    index.saturating_add(1).clamp(0, menu_bar_items_len - 1),
+                                ));
+                            }
+                        }
+                        KeyCode::Enter => match {
+                            let state = self.menu_bar.read().state;
+                            state
+                        } {
+                            MenuBarState::UndefinedMenu => (),
+                            MenuBarState::MainMenu => {
+                                if let Some(index) = {
+                                    let selected = self.menu_bar.read().items_state.selected();
+                                    selected
                                 } {
-                                    MenuBarState::UndefinedMenu => (),
-                                    MenuBarState::MainMenu => {
-                                        if let Some(index) = {
-                                            let selected =
-                                                self.menu_bar.read().items_state.selected();
-                                            selected
-                                        } {
-                                            match index {
-                                                0 => {
-                                                    self.accept_connect().await?;
-                                                    let mut menu_bar = self.menu_bar.write();
-                                                    menu_bar.state = MenuBarState::UndefinedMenu;
-                                                    menu_bar.items =
-                                                        vec!["等待连接...".to_string()];
-                                                    menu_bar.items_state.select(Some(0));
-                                                }
-                                                1 => {
-                                                    let all_registered_node_name =
-                                                        self.get_all_registered_node_name().await?;
-                                                    let mut menu_bar = self.menu_bar.write();
-                                                    menu_bar.state = MenuBarState::NodeListMenu;
-                                                    menu_bar.items = all_registered_node_name;
-                                                    menu_bar.items_state.select(Some(0));
-                                                }
-                                                2 => quit = true,
-                                                _ => (),
-                                            }
+                                    match index {
+                                        0 => {
+                                            self.accept_connect().await?;
+                                            let mut menu_bar = self.menu_bar.write();
+                                            menu_bar.state = MenuBarState::UndefinedMenu;
+                                            menu_bar.items = vec!["等待连接...".to_string()];
+                                            menu_bar.items_state.select(Some(0));
                                         }
-                                    }
-                                    MenuBarState::NodeListMenu => {
-                                        if let Some(index) = {
-                                            let selected =
-                                                self.menu_bar.read().items_state.selected();
-                                            selected
-                                        } {
-                                            self.connect({
-                                                let node_name =
-                                                    self.menu_bar.read().items[index].clone();
-                                                node_name
-                                            })
-                                            .await?;
+                                        1 => {
+                                            let all_registered_node_name =
+                                                self.get_all_registered_node_name().await?;
+                                            let mut menu_bar = self.menu_bar.write();
+                                            menu_bar.state = MenuBarState::NodeListMenu;
+                                            menu_bar.items = all_registered_node_name;
+                                            menu_bar.items_state.select(Some(0));
                                         }
-                                    }
-                                    MenuBarState::ChatMenu => (),
-                                },
-                                KeyCode::Tab => {
-                                    self.focus = Focus::MessageBar;
-                                    self.menu_bar.write().title_modifier = Modifier::default();
-                                    self.message_bar.write().title_modifier = Modifier::REVERSED;
-                                    if self.node_connection.read().is_some() {
-                                        self.text_input_bar.set_cursor_style(
-                                            Style::default().bg(style::Color::Black),
-                                        );
-                                    }
-                                }
-                                _ => (),
-                            },
-                            Focus::MessageBar => {
-                                match key.code {
-                                    KeyCode::Tab => {
-                                        self.focus = Focus::MenuBar;
-                                        self.message_bar.write().title_modifier =
-                                            Modifier::default();
-                                        self.menu_bar.write().title_modifier = Modifier::REVERSED;
-                                        self.text_input_bar.set_cursor_style(Style::default());
-                                    }
-                                    _ => (),
-                                }
-                                if let Some(_connection) = &*self.node_connection.read() {
-                                    match key.code {
-                                        KeyCode::Char(_) => {
-                                            self.text_input_bar.input(key);
-                                        }
-                                        KeyCode::Backspace => {
-                                            self.text_input_bar.delete_char();
-                                        }
-                                        KeyCode::Left => {
-                                            self.text_input_bar.move_cursor(CursorMove::Back)
-                                        }
-                                        KeyCode::Right => {
-                                            self.text_input_bar.move_cursor(CursorMove::Forward)
-                                        }
-                                        KeyCode::Enter => {
-                                            let mut input_text = String::new();
-                                            for lines in self.text_input_bar.lines() {
-                                                input_text.push_str(&lines);
-                                            }
-                                            self.message_bar.write().items.insert(
-                                                0,
-                                                format!("{}：{}", self.node_name, input_text),
-                                            );
-                                            self.text_input_bar.move_cursor(CursorMove::Head);
-                                            self.text_input_bar.delete_line_by_end();
-                                        }
+                                        2 => *quit = true,
                                         _ => (),
                                     }
                                 }
                             }
+                            MenuBarState::NodeListMenu => {
+                                if let Some(index) = {
+                                    let selected = self.menu_bar.read().items_state.selected();
+                                    selected
+                                } {
+                                    self.connect({
+                                        let node_name = self.menu_bar.read().items[index].clone();
+                                        node_name
+                                    })
+                                    .await?;
+                                }
+                            }
+                            MenuBarState::ChatMenu => (),
                         },
+                        KeyCode::Tab => {
+                            self.focus = Focus::MessageBar;
+                            self.menu_bar.write().title_modifier = Modifier::default();
+                            self.message_bar.write().title_modifier = Modifier::REVERSED;
+                            if self.node_connection.read().is_some() {
+                                self.text_input_bar
+                                    .set_cursor_style(Style::default().bg(style::Color::Black));
+                            }
+                        }
                         _ => (),
                     },
-                    _ => (),
-                }
-            }
+                    Focus::MessageBar => {
+                        match key.code {
+                            KeyCode::Tab => {
+                                self.focus = Focus::MenuBar;
+                                self.message_bar.write().title_modifier = Modifier::default();
+                                self.menu_bar.write().title_modifier = Modifier::REVERSED;
+                                self.text_input_bar.set_cursor_style(Style::default());
+                            }
+                            _ => (),
+                        }
+                        if let Some(_connection) = &*self.node_connection.read() {
+                            match key.code {
+                                KeyCode::Char(_) => {
+                                    self.text_input_bar.input(key);
+                                }
+                                KeyCode::Backspace => {
+                                    self.text_input_bar.delete_char();
+                                }
+                                KeyCode::Left => self.text_input_bar.move_cursor(CursorMove::Back),
+                                KeyCode::Right => {
+                                    self.text_input_bar.move_cursor(CursorMove::Forward)
+                                }
+                                KeyCode::Enter => {
+                                    let mut input_text = String::new();
+                                    for lines in self.text_input_bar.lines() {
+                                        input_text.push_str(&lines);
+                                    }
+                                    self.message_bar
+                                        .write()
+                                        .items
+                                        .insert(0, format!("{}：{}", self.node_name, input_text));
+                                    self.text_input_bar.move_cursor(CursorMove::Head);
+                                    self.text_input_bar.delete_line_by_end();
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                },
+                _ => (),
+            },
+            _ => (),
         }
-        disable_raw_mode()?;
-        stdout().execute(LeaveAlternateScreen)?;
         Ok(())
     }
     async fn accept_connect(&mut self) -> Result<()> {
