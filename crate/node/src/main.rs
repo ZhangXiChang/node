@@ -2,7 +2,6 @@ use std::{
     fs::{create_dir_all, File},
     io::{stdout, Read},
     path::PathBuf,
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -216,13 +215,12 @@ impl<'a> App<'a> {
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         let mut quit = false;
         while !quit {
-            {
-                terminal.draw(|frame| {
-                    self.draw(frame);
-                })?;
+            terminal.draw(|frame| {
+                self.draw(frame);
+            })?;
+            if event::poll(Duration::ZERO)? {
                 self.input_handling(&mut quit).await?;
             }
-            if event::poll(Duration::ZERO)? {}
         }
         disable_raw_mode()?;
         stdout().execute(LeaveAlternateScreen)?;
@@ -372,7 +370,7 @@ impl<'a> App<'a> {
                             }
                             _ => (),
                         }
-                        if let Some(_connection) = &*self.node_connection.read() {
+                        if let Some(connection) = &*self.node_connection.read() {
                             match key.code {
                                 KeyCode::Char(_) => {
                                     self.text_input_bar.input(key);
@@ -395,6 +393,9 @@ impl<'a> App<'a> {
                                         .insert(0, format!("{}：{}", self.node_name, input_text));
                                     self.text_input_bar.move_cursor(CursorMove::Head);
                                     self.text_input_bar.delete_line_by_end();
+                                    let mut send = connection.open_uni().await?;
+                                    send.write_all(input_text.as_bytes()).await?;
+                                    send.finish().await?;
                                 }
                                 _ => (),
                             }
@@ -407,7 +408,7 @@ impl<'a> App<'a> {
         }
         Ok(())
     }
-    async fn accept_connect(&mut self) -> Result<()> {
+    async fn accept_connect(&self) -> Result<()> {
         //注册节点
         tokio::spawn({
             let root_node_connection = self.root_node_connection.clone();
@@ -452,23 +453,15 @@ impl<'a> App<'a> {
             let menu_bar = self.menu_bar.clone();
             async move {
                 if let Some(connecting) = endpoint.accept().await {
-                    let connection = connecting.await?.clone();
-                    message_bar
-                        .write()
-                        .items
-                        .insert(0, format!("[{}]连接成功", connection.remote_address()));
-                    *node_connection.write() = Some(connection);
-                    let mut menu_bar = menu_bar.write();
-                    menu_bar.state = MenuBarState::ChatMenu;
-                    menu_bar.items = menu_bar.state.to_menu_items();
-                    menu_bar.items_state.select(Some(0));
+                    let connection = connecting.await?;
+                    Self::connection_handling(connection, message_bar, node_connection, menu_bar);
                 }
                 anyhow::Ok(())
             }
         });
         Ok(())
     }
-    async fn get_all_registered_node_name(&mut self) -> Result<Vec<String>> {
+    async fn get_all_registered_node_name(&self) -> Result<Vec<String>> {
         //从根节点获取注册的节点
         let (mut send, mut recv) = self.root_node_connection.open_bi().await?;
         send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
@@ -486,7 +479,7 @@ impl<'a> App<'a> {
         }
         return Err(anyhow!("从根节点获取全部注册的节点失败"));
     }
-    async fn connect(&mut self, node_name: String) -> Result<()> {
+    async fn connect(&self, node_name: String) -> Result<()> {
         //通过根节点连接节点
         tokio::spawn({
             let root_node_connection = self.root_node_connection.clone();
@@ -517,17 +510,12 @@ impl<'a> App<'a> {
                             )?
                             .await
                         {
-                            Ok(connection) => {
-                                message_bar.write().items.insert(
-                                    0,
-                                    format!("[{}]连接成功", connection.remote_address()),
-                                );
-                                *node_connection.write() = Some(connection);
-                                let mut menu_bar = menu_bar.write();
-                                menu_bar.state = MenuBarState::ChatMenu;
-                                menu_bar.items = menu_bar.state.to_menu_items();
-                                menu_bar.items_state.select(Some(0));
-                            }
+                            Ok(connection) => Self::connection_handling(
+                                connection,
+                                message_bar,
+                                node_connection,
+                                menu_bar,
+                            ),
                             Err(err) => {
                                 message_bar
                                     .write()
@@ -555,6 +543,44 @@ impl<'a> App<'a> {
             }
         });
         Ok(())
+    }
+    fn connection_handling(
+        connection: Connection,
+        message_bar: Arc<RwLock<MessageBar>>,
+        node_connection: Arc<RwLock<Option<Connection>>>,
+        menu_bar: Arc<RwLock<MenuBar>>,
+    ) {
+        message_bar
+            .write()
+            .items
+            .insert(0, format!("[{}]连接成功", connection.remote_address()));
+        tokio::spawn({
+            let connection = connection.clone();
+            let message_bar = message_bar.clone();
+            async move {
+                loop {
+                    let mut recv = connection.accept_uni().await?;
+                    let msg = recv.read_to_end(usize::MAX).await?;
+                    message_bar.write().items.insert(
+                        0,
+                        format!(
+                            "{}：{}",
+                            connection.remote_address(),
+                            String::from_utf8(msg)?
+                        ),
+                    );
+                    if false {
+                        break;
+                    }
+                }
+                anyhow::Ok(())
+            }
+        });
+        *node_connection.write() = Some(connection);
+        let mut menu_bar = menu_bar.write();
+        menu_bar.state = MenuBarState::ChatMenu;
+        menu_bar.items = menu_bar.state.to_menu_items();
+        menu_bar.items_state.select(Some(0));
     }
 }
 
