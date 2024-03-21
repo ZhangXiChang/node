@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
                             send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
                                 ResponseDataPacket::GetRootNodeInfo {
                                     root_node_name: "北方通信".to_string(),
-                                    root_node_description: "这是一个根节点的描述".to_string(),
+                                    root_node_description: "欢迎使用北方通信".to_string(),
                                 },
                             ))?)
                             .await?;
