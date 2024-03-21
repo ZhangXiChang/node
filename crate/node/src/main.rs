@@ -2,6 +2,7 @@ use std::{
     fs::{create_dir_all, File},
     io::{stdout, Read},
     path::PathBuf,
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -35,6 +36,19 @@ enum MenuBarState {
     MainMenu,
     NodeListMenu,
     ChatMenu,
+}
+impl MenuBarState {
+    fn to_menu_items(&self) -> Vec<String> {
+        match self {
+            MenuBarState::MainMenu => vec![
+                "接收连接".to_string(),
+                "主动连接".to_string(),
+                "退出程序".to_string(),
+            ],
+            MenuBarState::ChatMenu => vec!["断开连接".to_string()],
+            _ => vec![],
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -168,11 +182,7 @@ impl<'a> App<'a> {
             menu_bar: Arc::new(RwLock::new(MenuBar {
                 title: "主菜单".to_string(),
                 title_modifier: Modifier::REVERSED,
-                items: vec![
-                    "接收连接".to_string(),
-                    "主动连接".to_string(),
-                    "退出程序".to_string(),
-                ],
+                items: MenuBarState::MainMenu.to_menu_items(),
                 state: MenuBarState::MainMenu,
                 items_state: {
                     let mut items_state = ListState::default();
@@ -450,7 +460,8 @@ impl<'a> App<'a> {
                     *node_connection.write() = Some(connection);
                     let mut menu_bar = menu_bar.write();
                     menu_bar.state = MenuBarState::ChatMenu;
-                    menu_bar.items = vec!["断开连接".to_string()];
+                    menu_bar.items = menu_bar.state.to_menu_items();
+                    menu_bar.items_state.select(Some(0));
                 }
                 anyhow::Ok(())
             }
@@ -476,52 +487,73 @@ impl<'a> App<'a> {
         return Err(anyhow!("从根节点获取全部注册的节点失败"));
     }
     async fn connect(&mut self, node_name: String) -> Result<()> {
-        //从根节点获取用于连接的节点地址与证书
-        let (mut send, mut recv) = self.root_node_connection.open_bi().await?;
-        send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
-            RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
-        ))?)
-        .await?;
-        send.finish().await?;
-        match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
-            DataPacket::Response(ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(Some(
-                node_addr_and_cert,
-            ))) => {
-                //连接节点
-                let mut node_cert_store = rustls::RootCertStore::empty();
-                node_cert_store.add(&rustls::Certificate(node_addr_and_cert.cert.clone()))?;
-                match self
-                    .endpoint
-                    .connect_with(
-                        ClientConfig::with_root_certificates(node_cert_store),
-                        node_addr_and_cert.ip_addr,
-                        &x509_dns_name_from_der(&node_addr_and_cert.cert)?,
-                    )?
-                    .await
-                {
-                    Ok(connection) => {
-                        self.message_bar
+        //通过根节点连接节点
+        tokio::spawn({
+            let root_node_connection = self.root_node_connection.clone();
+            let endpoint = self.endpoint.clone();
+            let message_bar = self.message_bar.clone();
+            let node_connection = self.node_connection.clone();
+            let menu_bar = self.menu_bar.clone();
+            async move {
+                let (mut send, mut recv) = root_node_connection.open_bi().await?;
+                send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+                    RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
+                ))?)
+                .await?;
+                send.finish().await?;
+                match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
+                    DataPacket::Response(ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(
+                        Some(node_addr_and_cert),
+                    )) => {
+                        //连接节点
+                        let mut node_cert_store = rustls::RootCertStore::empty();
+                        node_cert_store
+                            .add(&rustls::Certificate(node_addr_and_cert.cert.clone()))?;
+                        match endpoint
+                            .connect_with(
+                                ClientConfig::with_root_certificates(node_cert_store),
+                                node_addr_and_cert.ip_addr,
+                                &x509_dns_name_from_der(&node_addr_and_cert.cert)?,
+                            )?
+                            .await
+                        {
+                            Ok(connection) => {
+                                message_bar.write().items.insert(
+                                    0,
+                                    format!("[{}]连接成功", connection.remote_address()),
+                                );
+                                *node_connection.write() = Some(connection);
+                                let mut menu_bar = menu_bar.write();
+                                menu_bar.state = MenuBarState::ChatMenu;
+                                menu_bar.items = menu_bar.state.to_menu_items();
+                                menu_bar.items_state.select(Some(0));
+                            }
+                            Err(err) => {
+                                message_bar
+                                    .write()
+                                    .items
+                                    .insert(0, format!("节点连接失败，原因：{}", err));
+                                let mut menu_bar = menu_bar.write();
+                                menu_bar.state = MenuBarState::MainMenu;
+                                menu_bar.items = menu_bar.state.to_menu_items();
+                                menu_bar.items_state.select(Some(0));
+                            }
+                        };
+                    }
+                    _ => {
+                        message_bar
                             .write()
                             .items
-                            .insert(0, format!("[{}]连接成功", connection.remote_address()));
-                        *self.node_connection.write() = Some(connection);
-                        let mut menu_bar = self.menu_bar.write();
-                        menu_bar.state = MenuBarState::ChatMenu;
-                        menu_bar.items = vec!["断开连接".to_string()];
+                            .insert(0, "没有找到节点".to_string());
+                        let mut menu_bar = menu_bar.write();
+                        menu_bar.state = MenuBarState::MainMenu;
+                        menu_bar.items = menu_bar.state.to_menu_items();
+                        menu_bar.items_state.select(Some(0));
                     }
-                    Err(err) => self
-                        .message_bar
-                        .write()
-                        .items
-                        .insert(0, format!("节点连接失败，原因：{}", err)),
-                };
+                }
+                anyhow::Ok(())
             }
-            _ => self
-                .message_bar
-                .write()
-                .items
-                .insert(0, "没有找到节点".to_string()),
-        }
+        });
         Ok(())
     }
 }
