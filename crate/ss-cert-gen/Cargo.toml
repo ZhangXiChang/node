@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.80"                                   #错误处理
-clap = { version = "4.5.1", features = ["derive"] } #命令行参数解析
+anyhow = "1.0.81"                                   #错误处理
+clap = { version = "4.5.3", features = ["derive"] } #命令行参数解析
 
 rcgen = "0.12.1" #自签名X.509证书生成

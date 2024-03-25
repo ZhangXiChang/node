@@ -2,7 +2,7 @@ use std::{
     fs::{create_dir_all, File},
     io::{stdout, Read},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -12,8 +12,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use parking_lot::RwLock;
-use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
+use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout},
@@ -80,14 +79,14 @@ struct MessageBar {
 struct App<'a> {
     focus: Focus,
     title_bar: TitleBar,
-    menu_bar: Arc<RwLock<MenuBar>>,
-    message_bar: Arc<RwLock<MessageBar>>,
+    menu_bar: Arc<Mutex<MenuBar>>,
+    message_bar: Arc<Mutex<MessageBar>>,
     text_input_bar: TextArea<'a>,
     endpoint: Endpoint,
     root_node_connection: Connection,
     node_name: String,
     cert: Vec<u8>,
-    node_connection: Arc<RwLock<Option<Connection>>>,
+    node_connection: Arc<Mutex<Option<Connection>>>,
 }
 impl<'a> App<'a> {
     async fn new() -> Result<Self> {
@@ -167,10 +166,9 @@ impl<'a> App<'a> {
         send.finish().await?;
         let (root_node_name, root_node_description) =
             match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
-                DataPacket::Response(ResponseDataPacket::GetRootNodeInfo {
-                    root_node_name,
-                    root_node_description,
-                }) => (root_node_name, root_node_description),
+                DataPacket::Response(ResponseDataPacket::GetRootNodeInfo { name, description }) => {
+                    (name, description)
+                }
                 _ => return Err(anyhow!("服务端返回了预料之外的数据包")),
             };
         Ok(Self {
@@ -178,7 +176,7 @@ impl<'a> App<'a> {
             title_bar: TitleBar {
                 title: format!("欢迎使用节点网络，根节点[{}]为您服务", root_node_name),
             },
-            menu_bar: Arc::new(RwLock::new(MenuBar {
+            menu_bar: Arc::new(Mutex::new(MenuBar {
                 title: "主菜单".to_string(),
                 title_modifier: Modifier::REVERSED,
                 items: MenuBarState::MainMenu.to_menu_items(),
@@ -189,7 +187,7 @@ impl<'a> App<'a> {
                     items_state
                 },
             })),
-            message_bar: Arc::new(RwLock::new(MessageBar {
+            message_bar: Arc::new(Mutex::new(MessageBar {
                 title: "消息栏".to_string(),
                 title_modifier: Modifier::default(),
                 items: vec![format!("{}：{}", root_node_name, root_node_description)],
@@ -205,7 +203,7 @@ impl<'a> App<'a> {
             root_node_connection,
             node_name: config.node_name,
             cert: certificate.serialize_der()?,
-            node_connection: Arc::new(RwLock::new(None)),
+            node_connection: Arc::new(Mutex::new(None)),
         })
     }
     async fn run(mut self) -> Result<()> {
@@ -235,44 +233,57 @@ impl<'a> App<'a> {
                 .alignment(Alignment::Center),
             title_area,
         );
+
         let [menu_area, chat_area] =
             Layout::horizontal([Constraint::Length(20), Constraint::Min(0)])
                 .areas(interactive_area);
-
         frame.render_stateful_widget(
             List::new({
-                let menu_bar_items = self.menu_bar.read().items.clone();
-                menu_bar_items
+                let a = self.menu_bar.lock().unwrap().items.clone();
+                a
             })
             .block(Block::new().borders(Borders::ALL).title({
-                let menu_bar_title = self
+                let title_modifier = {
+                    let a = self.menu_bar.lock().unwrap().title_modifier;
+                    a
+                };
+                let a = self
                     .menu_bar
-                    .read()
+                    .lock()
+                    .unwrap()
                     .title
                     .clone()
-                    .add_modifier(self.menu_bar.read().title_modifier);
-                menu_bar_title
+                    .add_modifier(title_modifier);
+                a
             }))
             .highlight_style(Style::new().add_modifier(Modifier::BOLD))
             .highlight_symbol(">> "),
             menu_area,
-            &mut self.menu_bar.write().items_state,
+            &mut self.menu_bar.lock().unwrap().items_state,
         );
 
         let [message_area, text_input_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(chat_area);
         frame.render_widget(
-            List::new(self.message_bar.read().items.clone())
-                .direction(ListDirection::BottomToTop)
-                .block(
-                    Block::new().borders(Borders::ALL).title(
-                        self.message_bar
-                            .read()
-                            .title
-                            .clone()
-                            .add_modifier(self.message_bar.read().title_modifier),
-                    ),
-                ),
+            List::new({
+                let a = self.message_bar.lock().unwrap().items.clone();
+                a
+            })
+            .direction(ListDirection::BottomToTop)
+            .block(Block::new().borders(Borders::ALL).title({
+                let title_modifier = {
+                    let a = self.message_bar.lock().unwrap().title_modifier;
+                    a
+                };
+                let a = self
+                    .message_bar
+                    .lock()
+                    .unwrap()
+                    .title
+                    .clone()
+                    .add_modifier(title_modifier);
+                a
+            })),
             message_area,
         );
         frame.render_widget(self.text_input_bar.widget(), text_input_area);
@@ -284,40 +295,44 @@ impl<'a> App<'a> {
                     Focus::MenuBar => match key.code {
                         KeyCode::Up => {
                             if let Some(index) = {
-                                let selected = self.menu_bar.read().items_state.selected();
-                                selected
+                                let a = self.menu_bar.lock().unwrap().items_state.selected();
+                                a
                             } {
                                 self.menu_bar
-                                    .write()
+                                    .lock()
+                                    .unwrap()
                                     .items_state
                                     .select(Some(index.saturating_sub(1)));
                             }
                         }
                         KeyCode::Down => {
                             if let Some(index) = {
-                                let selected = self.menu_bar.read().items_state.selected();
-                                selected
+                                let a = self.menu_bar.lock().unwrap().items_state.selected();
+                                a
                             } {
-                                let menu_bar_items_len = self.menu_bar.read().items.len();
-                                self.menu_bar.write().items_state.select(Some(
+                                let menu_bar_items_len = {
+                                    let a = self.menu_bar.lock().unwrap().items.len();
+                                    a
+                                };
+                                self.menu_bar.lock().unwrap().items_state.select(Some(
                                     index.saturating_add(1).clamp(0, menu_bar_items_len - 1),
                                 ));
                             }
                         }
                         KeyCode::Enter => match {
-                            let state = self.menu_bar.read().state;
-                            state
+                            let a = self.menu_bar.lock().unwrap().state;
+                            a
                         } {
                             MenuBarState::UndefinedMenu => (),
                             MenuBarState::MainMenu => {
                                 if let Some(index) = {
-                                    let selected = self.menu_bar.read().items_state.selected();
-                                    selected
+                                    let a = self.menu_bar.lock().unwrap().items_state.selected();
+                                    a
                                 } {
                                     match index {
                                         0 => {
                                             self.accept_connect().await?;
-                                            let mut menu_bar = self.menu_bar.write();
+                                            let mut menu_bar = self.menu_bar.lock().unwrap();
                                             menu_bar.state = MenuBarState::UndefinedMenu;
                                             menu_bar.items = vec!["等待连接...".to_string()];
                                             menu_bar.items_state.select(Some(0));
@@ -325,10 +340,18 @@ impl<'a> App<'a> {
                                         1 => {
                                             let all_registered_node_name =
                                                 self.get_all_registered_node_name().await?;
-                                            let mut menu_bar = self.menu_bar.write();
-                                            menu_bar.state = MenuBarState::NodeListMenu;
-                                            menu_bar.items = all_registered_node_name;
-                                            menu_bar.items_state.select(Some(0));
+                                            if !all_registered_node_name.is_empty() {
+                                                let mut menu_bar = self.menu_bar.lock().unwrap();
+                                                menu_bar.state = MenuBarState::NodeListMenu;
+                                                menu_bar.items = all_registered_node_name;
+                                                menu_bar.items_state.select(Some(0));
+                                            } else {
+                                                self.message_bar
+                                                    .lock()
+                                                    .unwrap()
+                                                    .items
+                                                    .insert(0, "没有注册的节点".to_string());
+                                            }
                                         }
                                         2 => *quit = true,
                                         _ => (),
@@ -337,23 +360,42 @@ impl<'a> App<'a> {
                             }
                             MenuBarState::NodeListMenu => {
                                 if let Some(index) = {
-                                    let selected = self.menu_bar.read().items_state.selected();
-                                    selected
+                                    let a = self.menu_bar.lock().unwrap().items_state.selected();
+                                    a
                                 } {
                                     self.connect({
-                                        let node_name = self.menu_bar.read().items[index].clone();
-                                        node_name
+                                        let a = self.menu_bar.lock().unwrap().items[index].clone();
+                                        a
                                     })
                                     .await?;
                                 }
                             }
-                            MenuBarState::ChatMenu => (),
+                            MenuBarState::ChatMenu => {
+                                if let Some(index) = {
+                                    let a = self.menu_bar.lock().unwrap().items_state.selected();
+                                    a
+                                } {
+                                    match index {
+                                        0 => {
+                                            if let Some(connection) =
+                                                &*self.node_connection.lock().unwrap()
+                                            {
+                                                connection.close(
+                                                    VarInt::from_u32(0),
+                                                    "主动关闭连接".as_bytes(),
+                                                );
+                                            }
+                                        }
+                                        _ => (),
+                                    }
+                                }
+                            }
                         },
                         KeyCode::Tab => {
                             self.focus = Focus::MessageBar;
-                            self.menu_bar.write().title_modifier = Modifier::default();
-                            self.message_bar.write().title_modifier = Modifier::REVERSED;
-                            if self.node_connection.read().is_some() {
+                            self.menu_bar.lock().unwrap().title_modifier = Modifier::default();
+                            self.message_bar.lock().unwrap().title_modifier = Modifier::REVERSED;
+                            if self.node_connection.lock().unwrap().is_some() {
                                 self.text_input_bar
                                     .set_cursor_style(Style::default().bg(style::Color::Black));
                             }
@@ -364,13 +406,14 @@ impl<'a> App<'a> {
                         match key.code {
                             KeyCode::Tab => {
                                 self.focus = Focus::MenuBar;
-                                self.message_bar.write().title_modifier = Modifier::default();
-                                self.menu_bar.write().title_modifier = Modifier::REVERSED;
+                                self.message_bar.lock().unwrap().title_modifier =
+                                    Modifier::default();
+                                self.menu_bar.lock().unwrap().title_modifier = Modifier::REVERSED;
                                 self.text_input_bar.set_cursor_style(Style::default());
                             }
                             _ => (),
                         }
-                        if let Some(connection) = &*self.node_connection.read() {
+                        if let Some(connection) = &*self.node_connection.lock().unwrap() {
                             match key.code {
                                 KeyCode::Char(_) => {
                                     self.text_input_bar.input(key);
@@ -387,15 +430,17 @@ impl<'a> App<'a> {
                                     for lines in self.text_input_bar.lines() {
                                         input_text.push_str(&lines);
                                     }
-                                    self.message_bar
-                                        .write()
-                                        .items
-                                        .insert(0, format!("{}：{}", self.node_name, input_text));
-                                    self.text_input_bar.move_cursor(CursorMove::Head);
-                                    self.text_input_bar.delete_line_by_end();
-                                    let mut send = connection.open_uni().await?;
-                                    send.write_all(input_text.as_bytes()).await?;
-                                    send.finish().await?;
+                                    if !input_text.is_empty() {
+                                        self.message_bar.lock().unwrap().items.insert(
+                                            0,
+                                            format!("{}：{}", self.node_name, input_text),
+                                        );
+                                        self.text_input_bar.move_cursor(CursorMove::Head);
+                                        self.text_input_bar.delete_line_by_end();
+                                        let mut send = connection.open_uni().await?;
+                                        send.write_all(input_text.as_bytes()).await?;
+                                        send.finish().await?;
+                                    }
                                 }
                                 _ => (),
                             }
@@ -417,7 +462,7 @@ impl<'a> App<'a> {
             async move {
                 let (mut send, _) = root_node_connection.open_bi().await?;
                 send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
-                    node_name,
+                    name: node_name,
                     cert,
                 })?)
                 .await?;
@@ -448,12 +493,17 @@ impl<'a> App<'a> {
         //接收连接
         tokio::spawn({
             let endpoint = self.endpoint.clone();
+            let root_node_connection = self.root_node_connection.clone();
             let message_bar = self.message_bar.clone();
             let node_connection = self.node_connection.clone();
             let menu_bar = self.menu_bar.clone();
             async move {
                 if let Some(connecting) = endpoint.accept().await {
                     let connection = connecting.await?;
+                    let (mut send, _) = root_node_connection.open_bi().await?;
+                    send.write_all(&rmp_serde::to_vec(&DataPacket::UnRegisterNode)?)
+                        .await?;
+                    send.finish().await?;
                     Self::connection_handling(connection, message_bar, node_connection, menu_bar);
                 }
                 anyhow::Ok(())
@@ -518,10 +568,11 @@ impl<'a> App<'a> {
                             ),
                             Err(err) => {
                                 message_bar
-                                    .write()
+                                    .lock()
+                                    .unwrap()
                                     .items
                                     .insert(0, format!("节点连接失败，原因：{}", err));
-                                let mut menu_bar = menu_bar.write();
+                                let mut menu_bar = menu_bar.lock().unwrap();
                                 menu_bar.state = MenuBarState::MainMenu;
                                 menu_bar.items = menu_bar.state.to_menu_items();
                                 menu_bar.items_state.select(Some(0));
@@ -530,10 +581,11 @@ impl<'a> App<'a> {
                     }
                     _ => {
                         message_bar
-                            .write()
+                            .lock()
+                            .unwrap()
                             .items
                             .insert(0, "没有找到节点".to_string());
-                        let mut menu_bar = menu_bar.write();
+                        let mut menu_bar = menu_bar.lock().unwrap();
                         menu_bar.state = MenuBarState::MainMenu;
                         menu_bar.items = menu_bar.state.to_menu_items();
                         menu_bar.items_state.select(Some(0));
@@ -546,38 +598,53 @@ impl<'a> App<'a> {
     }
     fn connection_handling(
         connection: Connection,
-        message_bar: Arc<RwLock<MessageBar>>,
-        node_connection: Arc<RwLock<Option<Connection>>>,
-        menu_bar: Arc<RwLock<MenuBar>>,
+        message_bar: Arc<Mutex<MessageBar>>,
+        node_connection: Arc<Mutex<Option<Connection>>>,
+        menu_bar: Arc<Mutex<MenuBar>>,
     ) {
-        message_bar
-            .write()
-            .items
-            .insert(0, format!("[{}]连接成功", connection.remote_address()));
+        {
+            message_bar
+                .lock()
+                .unwrap()
+                .items
+                .insert(0, format!("[{}]连接成功", connection.remote_address()));
+        }
         tokio::spawn({
             let connection = connection.clone();
             let message_bar = message_bar.clone();
+            let menu_bar = menu_bar.clone();
             async move {
                 loop {
-                    let mut recv = connection.accept_uni().await?;
-                    let msg = recv.read_to_end(usize::MAX).await?;
-                    message_bar.write().items.insert(
-                        0,
-                        format!(
-                            "{}：{}",
-                            connection.remote_address(),
-                            String::from_utf8(msg)?
-                        ),
-                    );
-                    if false {
-                        break;
+                    match connection.accept_uni().await {
+                        Ok(mut recv) => {
+                            let msg = recv.read_to_end(usize::MAX).await?;
+                            message_bar.lock().unwrap().items.insert(
+                                0,
+                                format!(
+                                    "{}：{}",
+                                    connection.remote_address(),
+                                    String::from_utf8(msg)?
+                                ),
+                            );
+                        }
+                        Err(err) => {
+                            message_bar.lock().unwrap().items.insert(
+                                0,
+                                format!("[{}]断开连接，原因：{}", connection.remote_address(), err),
+                            );
+                            let mut menu_bar = menu_bar.lock().unwrap();
+                            menu_bar.state = MenuBarState::MainMenu;
+                            menu_bar.items = menu_bar.state.to_menu_items();
+                            menu_bar.items_state.select(Some(0));
+                            break;
+                        }
                     }
                 }
                 anyhow::Ok(())
             }
         });
-        *node_connection.write() = Some(connection);
-        let mut menu_bar = menu_bar.write();
+        *node_connection.lock().unwrap() = Some(connection);
+        let mut menu_bar = menu_bar.lock().unwrap();
         menu_bar.state = MenuBarState::ChatMenu;
         menu_bar.items = menu_bar.state.to_menu_items();
         menu_bar.items_state.select(Some(0));

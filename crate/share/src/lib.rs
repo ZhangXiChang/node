@@ -12,7 +12,8 @@ use x509_parser::{
 pub enum DataPacket {
     Request(RequestDataPacket),
     Response(ResponseDataPacket),
-    RegisterNode { node_name: String, cert: Vec<u8> },
+    RegisterNode { name: String, cert: Vec<u8> },
+    UnRegisterNode,
 }
 #[derive(Serialize, Deserialize)]
 pub enum RequestDataPacket {
@@ -24,8 +25,8 @@ pub enum RequestDataPacket {
 #[derive(Serialize, Deserialize)]
 pub enum ResponseDataPacket {
     GetRootNodeInfo {
-        root_node_name: String,
-        root_node_description: String,
+        name: String,
+        description: String,
     },
     GetAllRegisteredNodeName {
         all_registered_node_name: Vec<String>,
