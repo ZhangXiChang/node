@@ -30,8 +30,8 @@ enum Focus {
 }
 #[derive(Clone, Copy)]
 enum MenuBarState {
-    UndefinedMenu,
     MainMenu,
+    WaitConnectMenu,
     NodeListMenu,
     ChatMenu,
 }
@@ -43,6 +43,7 @@ impl MenuBarState {
                 "主动连接".to_string(),
                 "退出程序".to_string(),
             ],
+            MenuBarState::WaitConnectMenu => vec!["结束".to_string()],
             MenuBarState::ChatMenu => vec!["断开连接".to_string()],
             _ => vec![],
         }
@@ -323,7 +324,6 @@ impl<'a> App<'a> {
                             let a = self.menu_bar.lock().unwrap().state;
                             a
                         } {
-                            MenuBarState::UndefinedMenu => (),
                             MenuBarState::MainMenu => {
                                 if let Some(index) = {
                                     let a = self.menu_bar.lock().unwrap().items_state.selected();
@@ -332,10 +332,6 @@ impl<'a> App<'a> {
                                     match index {
                                         0 => {
                                             self.accept_connect().await?;
-                                            let mut menu_bar = self.menu_bar.lock().unwrap();
-                                            menu_bar.state = MenuBarState::UndefinedMenu;
-                                            menu_bar.items = vec!["等待连接...".to_string()];
-                                            menu_bar.items_state.select(Some(0));
                                         }
                                         1 => {
                                             let all_registered_node_name =
@@ -354,6 +350,29 @@ impl<'a> App<'a> {
                                             }
                                         }
                                         2 => *quit = true,
+                                        _ => (),
+                                    }
+                                }
+                            }
+                            MenuBarState::WaitConnectMenu => {
+                                if let Some(index) = {
+                                    let a = self.menu_bar.lock().unwrap().items_state.selected();
+                                    a
+                                } {
+                                    match index {
+                                        0 => {
+                                            let (mut send, _) =
+                                                self.root_node_connection.open_bi().await?;
+                                            send.write_all(&rmp_serde::to_vec(
+                                                &DataPacket::UnRegisterNode,
+                                            )?)
+                                            .await?;
+                                            send.finish().await?;
+                                            let mut menu_bar = self.menu_bar.lock().unwrap();
+                                            menu_bar.state = MenuBarState::MainMenu;
+                                            menu_bar.items = menu_bar.state.to_menu_items();
+                                            menu_bar.items_state.select(Some(0));
+                                        }
                                         _ => (),
                                     }
                                 }
@@ -390,6 +409,18 @@ impl<'a> App<'a> {
                                     }
                                 }
                             }
+                        },
+                        KeyCode::Esc => match {
+                            let a = self.menu_bar.lock().unwrap().state;
+                            a
+                        } {
+                            MenuBarState::NodeListMenu => {
+                                let mut menu_bar = self.menu_bar.lock().unwrap();
+                                menu_bar.state = MenuBarState::MainMenu;
+                                menu_bar.items = menu_bar.state.to_menu_items();
+                                menu_bar.items_state.select(Some(0));
+                            }
+                            _ => (),
                         },
                         KeyCode::Tab => {
                             self.focus = Focus::MessageBar;
@@ -459,6 +490,8 @@ impl<'a> App<'a> {
             let root_node_connection = self.root_node_connection.clone();
             let node_name = self.node_name.clone();
             let cert = self.cert.clone();
+            let message_bar = self.message_bar.clone();
+            let menu_bar = self.menu_bar.clone();
             async move {
                 let (mut send, _) = root_node_connection.open_bi().await?;
                 send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
@@ -467,6 +500,15 @@ impl<'a> App<'a> {
                 })?)
                 .await?;
                 send.finish().await?;
+                message_bar
+                    .lock()
+                    .unwrap()
+                    .items
+                    .insert(0, "等待连接...".to_string());
+                let mut menu_bar = menu_bar.lock().unwrap();
+                menu_bar.state = MenuBarState::WaitConnectMenu;
+                menu_bar.items = menu_bar.state.to_menu_items();
+                menu_bar.items_state.select(Some(0));
                 eyre::Ok(())
             }
         });
