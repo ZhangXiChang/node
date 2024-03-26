@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 share = { path = "../share" }
 
-anyhow = "1.0.81"                                   #错误处理
+eyre = "0.6.12"                                     #错误报告
 tokio = { version = "1.36.0", features = ["full"] } #异步运行时
 clap = { version = "4.5.3", features = ["derive"] } #命令行参数解析
 

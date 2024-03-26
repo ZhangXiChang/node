@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
 use clap::Parser;
+use eyre::Result;
 use quinn::{Connection, Endpoint, ServerConfig, TransportConfig};
 use share::{DataPacket, NodeIPAddrAndCert, RequestDataPacket, ResponseDataPacket};
 
@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
                     register_node_list.remove(i);
                 }
             }
-            anyhow::Ok(())
+            eyre::Ok(())
         });
     }
     Ok(())

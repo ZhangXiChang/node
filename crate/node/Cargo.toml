@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 share = { path = "../share" }
 
-anyhow = "1.0.81"                                   #错误处理
+eyre = "0.6.12"                                     #错误报告
 tokio = { version = "1.36.0", features = ["full"] } #异步运行时
 
 quinn = "0.10.2"   #QUIC协议
@@ -19,4 +19,6 @@ serde_json = "1.0.114"                                 #Json编解码
 
 crossterm = "0.27.0"   #终端控制
 ratatui = "0.26.1"     #终端界面
-tui-textarea = "0.4.0" #终端文本输入框
+tui-textarea = "0.4.0" #终端文本输入
+
+uuid = { version = "1.8.0", features = ["v4"] } #通用唯一标识符

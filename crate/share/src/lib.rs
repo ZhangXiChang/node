@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use anyhow::{anyhow, Result};
+use eyre::{eyre, Result};
 use serde::{Deserialize, Serialize};
 use x509_parser::{
     certificate::X509Certificate,
@@ -54,5 +54,5 @@ pub fn x509_dns_name_from_der(cert_bytes: &[u8]) -> Result<String> {
             }
         }
     }
-    return Err(anyhow!("读取DnsName字段失败"));
+    return Err(eyre!("读取DnsName字段失败"));
 }

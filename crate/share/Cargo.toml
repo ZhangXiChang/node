@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.81"                                      #错误处理
+eyre = "0.6.12"                                        #错误报告
 serde = { version = "1.0.197", features = ["derive"] } #序列化
 x509-parser = "0.16.0"                                 #X.509证书解码

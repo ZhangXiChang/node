@@ -6,12 +6,12 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
+use eyre::{eyre, Result};
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
 use ratatui::{
     backend::CrosstermBackend,
@@ -146,7 +146,7 @@ impl<'a> App<'a> {
             }
         }
         if root_node_cert_store.is_empty() {
-            return Err(anyhow!("没有找到证书"));
+            return Err(eyre!("没有找到证书"));
         }
         endpoint
             .set_default_client_config(ClientConfig::with_root_certificates(root_node_cert_store));
@@ -169,7 +169,7 @@ impl<'a> App<'a> {
                 DataPacket::Response(ResponseDataPacket::GetRootNodeInfo { name, description }) => {
                     (name, description)
                 }
-                _ => return Err(anyhow!("服务端返回了预料之外的数据包")),
+                _ => return Err(eyre!("服务端返回了预料之外的数据包")),
             };
         Ok(Self {
             focus: Focus::MenuBar,
@@ -467,7 +467,7 @@ impl<'a> App<'a> {
                 })?)
                 .await?;
                 send.finish().await?;
-                anyhow::Ok(())
+                eyre::Ok(())
             }
         });
         //接收打洞信号
@@ -487,7 +487,7 @@ impl<'a> App<'a> {
                     }
                     _ => (),
                 }
-                anyhow::Ok(())
+                eyre::Ok(())
             }
         });
         //接收连接
@@ -506,7 +506,7 @@ impl<'a> App<'a> {
                     send.finish().await?;
                     Self::connection_handling(connection, message_bar, node_connection, menu_bar);
                 }
-                anyhow::Ok(())
+                eyre::Ok(())
             }
         });
         Ok(())
@@ -527,7 +527,7 @@ impl<'a> App<'a> {
             }
             _ => (),
         }
-        return Err(anyhow!("从根节点获取全部注册的节点失败"));
+        return Err(eyre!("从根节点获取全部注册的节点失败"));
     }
     async fn connect(&self, node_name: String) -> Result<()> {
         //通过根节点连接节点
@@ -591,7 +591,7 @@ impl<'a> App<'a> {
                         menu_bar.items_state.select(Some(0));
                     }
                 }
-                anyhow::Ok(())
+                eyre::Ok(())
             }
         });
         Ok(())
@@ -640,7 +640,7 @@ impl<'a> App<'a> {
                         }
                     }
                 }
-                anyhow::Ok(())
+                eyre::Ok(())
             }
         });
         *node_connection.lock().unwrap() = Some(connection);
