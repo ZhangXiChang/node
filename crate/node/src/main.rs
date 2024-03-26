@@ -225,7 +225,7 @@ impl<'a> App<'a> {
         stdout().execute(LeaveAlternateScreen)?;
         Ok(())
     }
-    fn draw(&mut self, frame: &mut Frame) {
+    fn draw(&self, frame: &mut Frame) {
         let [title_area, interactive_area] =
             Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(frame.size());
         frame.render_widget(
