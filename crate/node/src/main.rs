@@ -22,6 +22,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use share::{x509_dns_name_from_der, DataPacket, RequestDataPacket, ResponseDataPacket};
+use tokio::task::JoinHandle;
 use tui_textarea::{CursorMove, TextArea};
 
 enum Focus {
@@ -88,6 +89,8 @@ struct App<'a> {
     node_name: String,
     cert: Vec<u8>,
     node_connection: Arc<Mutex<Option<Connection>>>,
+    hole_punching_task: Option<JoinHandle<Result<()>>>,
+    recv_connect_task: Option<JoinHandle<Result<()>>>,
 }
 impl<'a> App<'a> {
     async fn new() -> Result<Self> {
@@ -205,6 +208,8 @@ impl<'a> App<'a> {
             node_name: config.node_name,
             cert: certificate.serialize_der()?,
             node_connection: Arc::new(Mutex::new(None)),
+            hole_punching_task: None,
+            recv_connect_task: None,
         })
     }
     async fn run(mut self) -> Result<()> {
@@ -372,6 +377,15 @@ impl<'a> App<'a> {
                                             menu_bar.state = MenuBarState::MainMenu;
                                             menu_bar.items = menu_bar.state.to_menu_items();
                                             menu_bar.items_state.select(Some(0));
+                                            if let Some(hole_punching_task) =
+                                                &self.hole_punching_task
+                                            {
+                                                hole_punching_task.abort();
+                                            }
+                                            if let Some(recv_connect_task) = &self.recv_connect_task
+                                            {
+                                                recv_connect_task.abort();
+                                            }
                                         }
                                         _ => (),
                                     }
@@ -484,36 +498,26 @@ impl<'a> App<'a> {
         }
         Ok(())
     }
-    async fn accept_connect(&self) -> Result<()> {
+    async fn accept_connect(&mut self) -> Result<()> {
         //注册节点
-        tokio::spawn({
-            let root_node_connection = self.root_node_connection.clone();
-            let node_name = self.node_name.clone();
-            let cert = self.cert.clone();
-            let message_bar = self.message_bar.clone();
-            let menu_bar = self.menu_bar.clone();
-            async move {
-                let (mut send, _) = root_node_connection.open_bi().await?;
-                send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
-                    name: node_name,
-                    cert,
-                })?)
-                .await?;
-                send.finish().await?;
-                message_bar
-                    .lock()
-                    .unwrap()
-                    .items
-                    .insert(0, "等待连接...".to_string());
-                let mut menu_bar = menu_bar.lock().unwrap();
-                menu_bar.state = MenuBarState::WaitConnectMenu;
-                menu_bar.items = menu_bar.state.to_menu_items();
-                menu_bar.items_state.select(Some(0));
-                eyre::Ok(())
-            }
-        });
+        let (mut send, _) = self.root_node_connection.open_bi().await?;
+        send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
+            name: self.node_name.clone(),
+            cert: self.cert.clone(),
+        })?)
+        .await?;
+        send.finish().await?;
+        self.message_bar
+            .lock()
+            .unwrap()
+            .items
+            .insert(0, "等待连接...".to_string());
+        let mut menu_bar = self.menu_bar.lock().unwrap();
+        menu_bar.state = MenuBarState::WaitConnectMenu;
+        menu_bar.items = menu_bar.state.to_menu_items();
+        menu_bar.items_state.select(Some(0));
         //接收打洞信号
-        tokio::spawn({
+        self.hole_punching_task = Some(tokio::spawn({
             let endpoint = self.endpoint.clone();
             let root_node_connection = self.root_node_connection.clone();
             async move {
@@ -531,14 +535,14 @@ impl<'a> App<'a> {
                 }
                 eyre::Ok(())
             }
-        });
+        }));
         //接收连接
-        tokio::spawn({
+        self.recv_connect_task = Some(tokio::spawn({
             let endpoint = self.endpoint.clone();
-            let root_node_connection = self.root_node_connection.clone();
             let message_bar = self.message_bar.clone();
             let node_connection = self.node_connection.clone();
             let menu_bar = self.menu_bar.clone();
+            let root_node_connection = self.root_node_connection.clone();
             async move {
                 if let Some(connecting) = endpoint.accept().await {
                     let connection = connecting.await?;
@@ -550,7 +554,7 @@ impl<'a> App<'a> {
                 }
                 eyre::Ok(())
             }
-        });
+        }));
         Ok(())
     }
     async fn get_all_registered_node_name(&self) -> Result<Vec<String>> {
@@ -573,69 +577,59 @@ impl<'a> App<'a> {
     }
     async fn connect(&self, node_name: String) -> Result<()> {
         //通过根节点连接节点
-        tokio::spawn({
-            let root_node_connection = self.root_node_connection.clone();
-            let endpoint = self.endpoint.clone();
-            let message_bar = self.message_bar.clone();
-            let node_connection = self.node_connection.clone();
-            let menu_bar = self.menu_bar.clone();
-            async move {
-                let (mut send, mut recv) = root_node_connection.open_bi().await?;
-                send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
-                    RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
-                ))?)
-                .await?;
-                send.finish().await?;
-                match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
-                    DataPacket::Response(ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(
-                        Some(node_addr_and_cert),
-                    )) => {
-                        //连接节点
-                        let mut node_cert_store = rustls::RootCertStore::empty();
-                        node_cert_store
-                            .add(&rustls::Certificate(node_addr_and_cert.cert.clone()))?;
-                        match endpoint
-                            .connect_with(
-                                ClientConfig::with_root_certificates(node_cert_store),
-                                node_addr_and_cert.ip_addr,
-                                &x509_dns_name_from_der(&node_addr_and_cert.cert)?,
-                            )?
-                            .await
-                        {
-                            Ok(connection) => Self::connection_handling(
-                                connection,
-                                message_bar,
-                                node_connection,
-                                menu_bar,
-                            ),
-                            Err(err) => {
-                                message_bar
-                                    .lock()
-                                    .unwrap()
-                                    .items
-                                    .insert(0, format!("节点连接失败，原因：{}", err));
-                                let mut menu_bar = menu_bar.lock().unwrap();
-                                menu_bar.state = MenuBarState::MainMenu;
-                                menu_bar.items = menu_bar.state.to_menu_items();
-                                menu_bar.items_state.select(Some(0));
-                            }
-                        };
-                    }
-                    _ => {
-                        message_bar
+        let (mut send, mut recv) = self.root_node_connection.open_bi().await?;
+        send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+            RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
+        ))?)
+        .await?;
+        send.finish().await?;
+        match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
+            DataPacket::Response(ResponseDataPacket::GetRegisteredNodeIPAddrAndCert(Some(
+                node_addr_and_cert,
+            ))) => {
+                //连接节点
+                let mut node_cert_store = rustls::RootCertStore::empty();
+                node_cert_store.add(&rustls::Certificate(node_addr_and_cert.cert.clone()))?;
+                match self
+                    .endpoint
+                    .connect_with(
+                        ClientConfig::with_root_certificates(node_cert_store),
+                        node_addr_and_cert.ip_addr,
+                        &x509_dns_name_from_der(&node_addr_and_cert.cert)?,
+                    )?
+                    .await
+                {
+                    Ok(connection) => Self::connection_handling(
+                        connection,
+                        self.message_bar.clone(),
+                        self.node_connection.clone(),
+                        self.menu_bar.clone(),
+                    ),
+                    Err(err) => {
+                        self.message_bar
                             .lock()
                             .unwrap()
                             .items
-                            .insert(0, "没有找到节点".to_string());
-                        let mut menu_bar = menu_bar.lock().unwrap();
+                            .insert(0, format!("节点连接失败，原因：{}", err));
+                        let mut menu_bar = self.menu_bar.lock().unwrap();
                         menu_bar.state = MenuBarState::MainMenu;
                         menu_bar.items = menu_bar.state.to_menu_items();
                         menu_bar.items_state.select(Some(0));
                     }
-                }
-                eyre::Ok(())
+                };
             }
-        });
+            _ => {
+                self.message_bar
+                    .lock()
+                    .unwrap()
+                    .items
+                    .insert(0, "没有找到节点".to_string());
+                let mut menu_bar = self.menu_bar.lock().unwrap();
+                menu_bar.state = MenuBarState::MainMenu;
+                menu_bar.items = menu_bar.state.to_menu_items();
+                menu_bar.items_state.select(Some(0));
+            }
+        }
         Ok(())
     }
     fn connection_handling(
