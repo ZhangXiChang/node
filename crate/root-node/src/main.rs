@@ -80,6 +80,11 @@ async fn main() -> Result<()> {
                             }
                             DataPacket::UnRegisterNode => {
                                 let mut register_node_list = register_node_list.lock().unwrap();
+                                println!(
+                                    "{}准备取消注册，当前剩余用户：{}",
+                                    connection.remote_address(),
+                                    register_node_list.len()
+                                );
                                 for i in 0..register_node_list.len() {
                                     if register_node_list[i].connection.stable_id()
                                         == connection.stable_id()
@@ -177,6 +182,11 @@ async fn main() -> Result<()> {
                 }
             }
             let mut register_node_list = register_node_list.lock().unwrap();
+            println!(
+                "{}断开连接准备取消注册，当前剩余用户：{}",
+                connection.remote_address(),
+                register_node_list.len()
+            );
             for i in 0..register_node_list.len() {
                 if register_node_list[i].connection.stable_id() == connection.stable_id() {
                     register_node_list.remove(i);
