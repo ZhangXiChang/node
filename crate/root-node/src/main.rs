@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
                                 });
                             }
                             DataPacket::UnRegisterNode => {
+                                //TODO
                                 let mut register_node_list = register_node_list.lock().unwrap();
                                 println!(
                                     "{}准备取消注册，当前剩余用户：{}",
@@ -181,6 +182,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            //TODO
             let mut register_node_list = register_node_list.lock().unwrap();
             println!(
                 "{}断开连接准备取消注册，当前剩余用户：{}",
