@@ -79,13 +79,7 @@ async fn main() -> Result<()> {
                                 });
                             }
                             DataPacket::UnRegisterNode => {
-                                //TODO
                                 let mut register_node_list = register_node_list.lock().unwrap();
-                                println!(
-                                    "{}准备取消注册，当前剩余用户：{}",
-                                    connection.remote_address(),
-                                    register_node_list.len()
-                                );
                                 for i in 0..register_node_list.len() {
                                     if register_node_list[i].connection.stable_id()
                                         == connection.stable_id()
@@ -111,7 +105,10 @@ async fn main() -> Result<()> {
                                 send.finish().await?;
                             }
                             DataPacket::Request(
-                                RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
+                                RequestDataPacket::GetRegisteredNodeIPAddrAndCert {
+                                    name,
+                                    node_name,
+                                },
                             ) => {
                                 let mut register_node = None;
                                 for node in {
@@ -135,6 +132,7 @@ async fn main() -> Result<()> {
                                     register_node_send
                                         .write_all(&rmp_serde::to_vec(&DataPacket::Request(
                                             RequestDataPacket::HolePunching {
+                                                node_name: name,
                                                 ip_addr: connection.remote_address(),
                                             },
                                         ))?)
@@ -182,13 +180,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            //TODO
             let mut register_node_list = register_node_list.lock().unwrap();
-            println!(
-                "{}断开连接准备取消注册，当前剩余用户：{}",
-                connection.remote_address(),
-                register_node_list.len()
-            );
             for i in 0..register_node_list.len() {
                 if register_node_list[i].connection.stable_id() == connection.stable_id() {
                     register_node_list.remove(i);

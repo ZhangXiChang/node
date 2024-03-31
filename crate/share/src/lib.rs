@@ -19,8 +19,14 @@ pub enum DataPacket {
 pub enum RequestDataPacket {
     GetRootNodeInfo,
     GetAllRegisteredNodeName,
-    GetRegisteredNodeIPAddrAndCert { node_name: String },
-    HolePunching { ip_addr: SocketAddr },
+    GetRegisteredNodeIPAddrAndCert {
+        name: String,
+        node_name: String,
+    },
+    HolePunching {
+        node_name: String,
+        ip_addr: SocketAddr,
+    },
 }
 #[derive(Serialize, Deserialize)]
 pub enum ResponseDataPacket {

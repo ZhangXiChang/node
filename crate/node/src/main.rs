@@ -73,9 +73,10 @@ struct App<'a> {
     text_input_bar: TextArea<'a>,
     endpoint: Endpoint,
     root_node_connection: Connection,
-    node_name: String,
+    name: String,
     cert: Vec<u8>,
     node_connection: Arc<Mutex<Option<Connection>>>,
+    node_name: Arc<Mutex<Option<String>>>,
     hole_punching_task: Option<JoinHandle<Result<()>>>,
     recv_connect_task: Option<JoinHandle<Result<()>>>,
 }
@@ -188,9 +189,10 @@ impl<'a> App<'a> {
             },
             endpoint,
             root_node_connection,
-            node_name: config.node_name,
+            name: config.node_name,
             cert: certificate.serialize_der()?,
             node_connection: Arc::new(Mutex::new(None)),
+            node_name: Arc::new(Mutex::new(None)),
             hole_punching_task: None,
             recv_connect_task: None,
         })
@@ -311,15 +313,8 @@ impl<'a> App<'a> {
                                                 menu_bar.set_items(MenuBarState::MainMenu.into());
                                                 menu_bar.select(Some(0));
                                             }
-                                            if let Some(hole_punching_task) =
-                                                &self.hole_punching_task
-                                            {
-                                                hole_punching_task.abort();
-                                            }
-                                            if let Some(recv_connect_task) = &self.recv_connect_task
-                                            {
-                                                recv_connect_task.abort();
-                                            }
+                                            self.hole_punching_task.as_ref().unwrap().abort();
+                                            self.recv_connect_task.as_ref().unwrap().abort();
                                         }
                                         _ => (),
                                     }
@@ -345,19 +340,13 @@ impl<'a> App<'a> {
                                 } {
                                     match index {
                                         0 => {
-                                            if let Some(connection) = {
-                                                let a =
-                                                    self.node_connection.lock().unwrap().clone();
-                                                a
-                                            } {
-                                                connection.close(
-                                                    VarInt::from_u32(0),
-                                                    "主动关闭连接".as_bytes(),
-                                                );
-                                                {
-                                                    *self.node_connection.lock().unwrap() = None;
-                                                }
-                                            }
+                                            let mut node_connection =
+                                                self.node_connection.lock().unwrap();
+                                            node_connection.as_ref().unwrap().close(
+                                                VarInt::from_u32(0),
+                                                "主动关闭连接".as_bytes(),
+                                            );
+                                            *node_connection = None;
                                         }
                                         _ => (),
                                     }
@@ -447,8 +436,7 @@ impl<'a> App<'a> {
                                     if !input_text.is_empty() {
                                         {
                                             self.message_bar.lock().unwrap().append(
-                                                format!("{}：{}", self.node_name, input_text)
-                                                    .as_str(),
+                                                format!("{}：{}", self.name, input_text).as_str(),
                                             );
                                         }
                                         self.text_input_bar.move_cursor(CursorMove::Head);
@@ -473,7 +461,7 @@ impl<'a> App<'a> {
         //注册节点
         let (mut send, _) = self.root_node_connection.open_bi().await?;
         send.write_all(&rmp_serde::to_vec(&DataPacket::RegisterNode {
-            name: self.node_name.clone(),
+            name: self.name.clone(),
             cert: self.cert.clone(),
         })?)
         .await?;
@@ -493,10 +481,15 @@ impl<'a> App<'a> {
         self.hole_punching_task = Some(tokio::spawn({
             let endpoint = self.endpoint.clone();
             let root_node_connection = self.root_node_connection.clone();
+            let node_name = self.node_name.clone();
             async move {
                 let (mut send, mut recv) = root_node_connection.accept_bi().await?;
                 match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
-                    DataPacket::Request(RequestDataPacket::HolePunching { ip_addr }) => {
+                    DataPacket::Request(RequestDataPacket::HolePunching {
+                        node_name: name,
+                        ip_addr,
+                    }) => {
+                        *node_name.lock().unwrap() = Some(name);
                         let _ = endpoint.connect(ip_addr, "_")?.await;
                         send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
                             ResponseDataPacket::HolePunching,
@@ -517,6 +510,7 @@ impl<'a> App<'a> {
             let menu_bar = self.menu_bar.clone();
             let root_node_connection = self.root_node_connection.clone();
             let menu_bar_state = self.menu_bar_state.clone();
+            let node_name = self.node_name.clone();
             async move {
                 if let Some(connecting) = endpoint.accept().await {
                     let connection = connecting.await?;
@@ -526,6 +520,10 @@ impl<'a> App<'a> {
                     send.finish().await?;
                     Self::connection_handling(
                         connection,
+                        {
+                            let a = node_name.lock().unwrap().as_ref().unwrap().clone();
+                            a
+                        },
                         node_connection,
                         message_bar,
                         menu_bar,
@@ -559,7 +557,10 @@ impl<'a> App<'a> {
         //通过根节点连接节点
         let (mut send, mut recv) = self.root_node_connection.open_bi().await?;
         send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
-            RequestDataPacket::GetRegisteredNodeIPAddrAndCert { node_name },
+            RequestDataPacket::GetRegisteredNodeIPAddrAndCert {
+                name: self.name.clone(),
+                node_name: node_name.clone(),
+            },
         ))?)
         .await?;
         send.finish().await?;
@@ -579,13 +580,16 @@ impl<'a> App<'a> {
                     )?
                     .await
                 {
-                    Ok(connection) => Self::connection_handling(
-                        connection,
-                        self.node_connection.clone(),
-                        self.message_bar.clone(),
-                        self.menu_bar.clone(),
-                        self.menu_bar_state.clone(),
-                    ),
+                    Ok(connection) => {
+                        Self::connection_handling(
+                            connection,
+                            node_name,
+                            self.node_connection.clone(),
+                            self.message_bar.clone(),
+                            self.menu_bar.clone(),
+                            self.menu_bar_state.clone(),
+                        );
+                    }
                     Err(err) => {
                         {
                             self.message_bar
@@ -622,6 +626,7 @@ impl<'a> App<'a> {
     }
     fn connection_handling(
         connection: Connection,
+        node_name: String,
         node_connection: Arc<Mutex<Option<Connection>>>,
         message_bar: Arc<Mutex<MessageBar>>,
         menu_bar: Arc<Mutex<MenuBar>>,
@@ -631,8 +636,9 @@ impl<'a> App<'a> {
             message_bar
                 .lock()
                 .unwrap()
-                .append(format!("[{}]连接成功", connection.remote_address()).as_str());
+                .append(format!("[{}]连接成功", node_name).as_str());
         }
+        //接收数据
         tokio::spawn({
             let connection = connection.clone();
             let message_bar = message_bar.clone();
@@ -645,24 +651,14 @@ impl<'a> App<'a> {
                             let msg = recv.read_to_end(usize::MAX).await?;
                             {
                                 message_bar.lock().unwrap().append(
-                                    format!(
-                                        "{}：{}",
-                                        connection.remote_address(),
-                                        String::from_utf8(msg)?
-                                    )
-                                    .as_str(),
+                                    format!("{}：{}", node_name, String::from_utf8(msg)?).as_str(),
                                 );
                             }
                         }
                         Err(err) => {
                             {
                                 message_bar.lock().unwrap().append(
-                                    format!(
-                                        "[{}]断开连接，原因：{}",
-                                        connection.remote_address(),
-                                        err
-                                    )
-                                    .as_str(),
+                                    format!("[{}]断开连接，原因：{}", node_name, err).as_str(),
                                 );
                             }
                             {
