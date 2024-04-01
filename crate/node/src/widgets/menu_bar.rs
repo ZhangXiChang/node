@@ -1,32 +1,9 @@
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Modifier, Style, Stylize},
-    widgets::{Block, Borders, List, ListDirection, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListState},
     Frame,
 };
-
-#[derive(Default)]
-pub struct TitleBarInfo<'a> {
-    pub title: &'a str,
-}
-pub struct TitleBar {
-    title: String,
-}
-impl TitleBar {
-    pub fn new(info: TitleBarInfo) -> Self {
-        Self {
-            title: info.title.to_string(),
-        }
-    }
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(
-            Paragraph::new(self.title.clone())
-                .block(Block::new().borders(Borders::ALL))
-                .alignment(Alignment::Center),
-            area,
-        );
-    }
-}
 
 #[derive(Default)]
 pub struct MenuBarInfo<'a> {
@@ -92,44 +69,5 @@ impl MenuBar {
     }
     pub fn items(&self) -> Vec<String> {
         self.items.clone()
-    }
-}
-
-#[derive(Default)]
-pub struct MessageBarInfo<'a> {
-    pub title: &'a str,
-    pub title_modifier: Modifier,
-    pub items: Vec<&'a str>,
-}
-pub struct MessageBar {
-    title: String,
-    title_modifier: Modifier,
-    items: Vec<String>,
-}
-impl MessageBar {
-    pub fn new(info: MessageBarInfo) -> Self {
-        Self {
-            title: info.title.to_string(),
-            title_modifier: info.title_modifier,
-            items: info.items.iter().map(|&s| s.to_string()).collect(),
-        }
-    }
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(
-            List::new(self.items.clone())
-                .direction(ListDirection::BottomToTop)
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .title(self.title.clone().add_modifier(self.title_modifier)),
-                ),
-            area,
-        );
-    }
-    pub fn set_title_modifier(&mut self, title_modifier: Modifier) {
-        self.title_modifier = title_modifier;
-    }
-    pub fn append(&mut self, msg: &str) {
-        self.items.insert(0, msg.to_string());
     }
 }

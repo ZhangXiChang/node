@@ -26,8 +26,11 @@ use serde::{Deserialize, Serialize};
 use share::{x509_dns_name_from_der, DataPacket, RequestDataPacket, ResponseDataPacket};
 use tokio::task::JoinHandle;
 use tui_textarea::{CursorMove, TextArea};
-
-use widgets::*;
+use widgets::{
+    menu_bar::{MenuBar, MenuBarInfo},
+    message_bar::{MessageBar, MessageBarInfo},
+    title_bar::{TitleBar, TitleBarInfo},
+};
 
 #[derive(Serialize, Deserialize)]
 struct RootNodeConfig {
