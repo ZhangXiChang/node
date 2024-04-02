@@ -1,4 +1,7 @@
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 use eyre::{eyre, Result};
 use serde::{Deserialize, Serialize};
@@ -61,4 +64,25 @@ pub fn x509_dns_name_from_der(cert_bytes: &[u8]) -> Result<String> {
         }
     }
     return Err(eyre!("读取DnsName字段失败"));
+}
+
+pub struct ArcMutex<T> {
+    arc_t: Arc<Mutex<T>>,
+}
+impl<T> ArcMutex<T> {
+    pub fn new(t: T) -> Self {
+        Self {
+            arc_t: Arc::new(Mutex::new(t)),
+        }
+    }
+    pub fn lock(&self) -> MutexGuard<T> {
+        self.arc_t.lock().unwrap()
+    }
+}
+impl<T> Clone for ArcMutex<T> {
+    fn clone(&self) -> Self {
+        Self {
+            arc_t: self.arc_t.clone(),
+        }
+    }
 }

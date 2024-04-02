@@ -5,6 +5,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::system::widget;
+
 #[derive(Default)]
 pub struct MessageBarInfo<'a> {
     pub title: &'a str,
@@ -24,7 +26,15 @@ impl MessageBar {
             items: info.items.iter().map(|&s| s.to_string()).collect(),
         }
     }
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+    pub fn set_title_modifier(&mut self, title_modifier: Modifier) {
+        self.title_modifier = title_modifier;
+    }
+    pub fn append(&mut self, msg: &str) {
+        self.items.insert(0, msg.to_string());
+    }
+}
+impl widget::Componect for MessageBar {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
         frame.render_widget(
             List::new(self.items.clone())
                 .direction(ListDirection::BottomToTop)
@@ -35,11 +45,5 @@ impl MessageBar {
                 ),
             area,
         );
-    }
-    pub fn set_title_modifier(&mut self, title_modifier: Modifier) {
-        self.title_modifier = title_modifier;
-    }
-    pub fn append(&mut self, msg: &str) {
-        self.items.insert(0, msg.to_string());
     }
 }

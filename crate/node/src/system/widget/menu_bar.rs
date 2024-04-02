@@ -1,9 +1,13 @@
+use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style, Stylize},
     widgets::{Block, Borders, List, ListState},
     Frame,
 };
+use share::ArcMutex;
+
+use crate::system::widget;
 
 #[derive(Default)]
 pub struct MenuBarInfo<'a> {
@@ -31,20 +35,6 @@ impl MenuBar {
             },
         }
     }
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        frame.render_stateful_widget(
-            List::new(self.items.clone())
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .title(self.title.clone().add_modifier(self.title_modifier)),
-                )
-                .highlight_style(Style::new().add_modifier(Modifier::BOLD))
-                .highlight_symbol(">> "),
-            area,
-            &mut self.items_state,
-        );
-    }
     pub fn set_title_modifier(&mut self, title_modifier: Modifier) {
         self.title_modifier = title_modifier;
     }
@@ -69,5 +59,49 @@ impl MenuBar {
     }
     pub fn items(&self) -> Vec<String> {
         self.items.clone()
+    }
+}
+impl widget::Componect for MenuBar {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        frame.render_stateful_widget(
+            List::new(self.items.clone())
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .title(self.title.clone().add_modifier(self.title_modifier)),
+                )
+                .highlight_style(Style::new().add_modifier(Modifier::BOLD))
+                .highlight_symbol(">> "),
+            area,
+            &mut self.items_state,
+        );
+    }
+    fn event(
+        &mut self,
+        system: ArcMutex<crate::system::System>,
+        event: &Event,
+    ) -> eyre::Result<()> {
+        match event {
+            Event::Key(key) => match key.kind {
+                KeyEventKind::Press => match key.code {
+                    KeyCode::Up => self.up_select(),
+                    KeyCode::Down => self.down_select(),
+                    KeyCode::Enter => {
+                        if let Some(selected) = self.selected() {
+                            match selected {
+                                0 => (),
+                                1 => (),
+                                2 => system.lock().quit(),
+                                _ => (),
+                            }
+                        }
+                    }
+                    _ => (),
+                },
+                _ => (),
+            },
+            _ => (),
+        }
+        Ok(())
     }
 }
