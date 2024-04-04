@@ -4,21 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-share = { path = "../share" }
+eyre = "0.6.12"       #错误报告
+env_logger = "0.11.3" #日志消费者
 
-eyre = "0.6.12"                                     #错误报告
-tokio = { version = "1.36.0", features = ["full"] } #异步运行时
+eframe = "0.27.2"                                          #EGUI运行框架
+egui_extras = { version = "0.27.2", features = ["image"] } #EGUI扩展
 
-quinn = "0.10.2"   #QUIC协议
-rustls = "0.21.10" #TLS加密
-rcgen = "0.12.1"   #自签名X.509证书生成
-
-serde = { version = "1.0.197", features = ["derive"] } #序列化
-rmp-serde = "1.1.2"                                    #MessagePack编解码
-serde_json = "1.0.114"                                 #Json编解码
-
-crossterm = "0.27.0"   #终端控制
-ratatui = "0.26.1"     #终端界面
-tui-textarea = "0.4.0" #终端文本输入
-
-uuid = { version = "1.8.0", features = ["v4"] } #通用唯一标识符
+image = "0.25.1" #图像库
