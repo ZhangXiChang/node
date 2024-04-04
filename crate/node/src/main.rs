@@ -1,30 +1,35 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use eyre::{eyre, Result};
 
 use eframe::egui;
+use log::error;
 
 const ICON: &[u8] = include_bytes!("../../../assets/icon/node_network_icon.png");
 const ICON_WIDTH: u32 = 512;
 const ICON_HEIGHT: u32 = 512;
 
-#[derive(Default)]
-struct App {
-    input_text: String,
+struct App;
+impl Default for App {
+    fn default() -> Self {
+        Self
+    }
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::SidePanel::left("MenuBar").show(ctx, |ui| {
+            if ui.button("绘制曲线").clicked() {
+                error!("执行绘制曲线");
+            }
+        });
         egui::CentralPanel::default().show(ctx, |ui| {
-            // ui.add(
-            //     egui::Image::new(egui::ImageSource::Bytes {
-            //         uri: Cow::default(),
-            //         bytes: egui::load::Bytes::Static(ICON),
-            //     })
-            //     .max_size(egui::Vec2::new(ICON_WIDTH as f32, ICON_HEIGHT as f32)),
-            // );
-            ui.heading("你的输入：");
-            ui.label(&self.input_text);
-            ui.text_edit_singleline(&mut self.input_text);
+            ui.add(
+                egui::Image::new(egui::ImageSource::Bytes {
+                    uri: Cow::default(),
+                    bytes: egui::load::Bytes::Static(ICON),
+                })
+                .max_size(egui::Vec2::new(ICON_WIDTH as f32, ICON_HEIGHT as f32)),
+            );
         });
     }
 }
@@ -44,7 +49,11 @@ fn main() -> Result<()> {
                     width: ICON_WIDTH,
                     height: ICON_HEIGHT,
                 })),
-                inner_size: Some(egui::Vec2::new(800., 600.)),
+                inner_size: Some(egui::Vec2::new(
+                    ICON_WIDTH as f32 + 145.,
+                    ICON_HEIGHT as f32,
+                )),
+                resizable: Some(false),
                 ..Default::default()
             },
             ..Default::default()
