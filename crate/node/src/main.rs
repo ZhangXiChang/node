@@ -3,28 +3,110 @@ use std::{borrow::Cow, sync::Arc};
 use eyre::{eyre, Result};
 
 use eframe::egui;
-use log::{info, LevelFilter};
+use log::LevelFilter;
 
 const ICON: &[u8] = include_bytes!("../../../assets/icon/node_network_icon.png");
 const ICON_WIDTH: u32 = 512;
 const ICON_HEIGHT: u32 = 512;
 
-#[derive(Default)]
-struct App;
+enum ConnectionState {
+    Connected,
+    Disconnect,
+    Connecting,
+}
+
+#[derive(Clone)]
+enum Message {
+    Info(String),
+    Error(String),
+}
+
+#[derive(Clone)]
+struct UIModeSwitchButtonText(String);
+impl From<UIModeSwitchButtonText> for String {
+    fn from(value: UIModeSwitchButtonText) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone)]
+enum UIMode {
+    Unfold,
+    Fold,
+}
+impl From<UIMode> for UIModeSwitchButtonText {
+    fn from(value: UIMode) -> Self {
+        match value {
+            UIMode::Unfold => Self("展开程序".to_owned()),
+            UIMode::Fold => Self("折叠程序".to_owned()),
+        }
+    }
+}
+
+struct App {
+    root_node_connection_state: ConnectionState,
+    state_bar_message: Message,
+    ui_mode: UIMode,
+    ui_mode_switch_button_text: UIModeSwitchButtonText,
+}
+impl App {
+    fn new() -> Self {
+        Self {
+            root_node_connection_state: ConnectionState::Disconnect,
+            state_bar_message: Message::Info(String::new()),
+            ui_mode: UIMode::Unfold,
+            ui_mode_switch_button_text: UIMode::Unfold.into(),
+        }
+    }
+}
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("MenuBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("关闭").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                if ui
+                    .button(String::from(self.ui_mode_switch_button_text.clone()))
+                    .clicked()
+                {
+                    match self.ui_mode {
+                        UIMode::Unfold => {
+                            self.ui_mode = UIMode::Fold;
+                            self.ui_mode_switch_button_text = self.ui_mode.clone().into();
+                        }
+                        UIMode::Fold => {
+                            self.ui_mode = UIMode::Unfold;
+                            self.ui_mode_switch_button_text = self.ui_mode.clone().into();
+                        }
+                    }
                 }
-                let (response, _) = ui.allocate_painter(ui.available_size(), egui::Sense::drag());
-                if response.dragged() {
-                    info!("拖动的距离{:?}", response.drag_delta());
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(
-                        0., -10.,
-                    )));
+                ui.menu_button("关于", |ui| {
+                    ui.label("作者：张喜昌");
+                    if ui.button("源代码").clicked() {
+                        let _ = opener::open("https://github.com/ZhangXiChang/node-network");
+                    }
+                });
+            });
+        });
+        egui::TopBottomPanel::bottom("StateBar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("连接根节点").clicked() {
+                    self.state_bar_message = Message::Error("根节点连接失败！".to_owned());
                 }
+                match self.root_node_connection_state {
+                    ConnectionState::Connected => {
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, "根节点已连接")
+                    }
+                    ConnectionState::Disconnect => {
+                        ui.colored_label(egui::Color32::LIGHT_RED, "根节点未连接")
+                    }
+                    ConnectionState::Connecting => {
+                        ui.colored_label(egui::Color32::LIGHT_BLUE, "根节点连接中...")
+                    }
+                };
+                ui.label("|");
+                match self.state_bar_message.clone() {
+                    Message::Info(msg) => ui.colored_label(egui::Color32::LIGHT_GRAY, msg),
+                    Message::Error(msg) => ui.colored_label(egui::Color32::LIGHT_RED, msg),
+                };
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -34,7 +116,7 @@ impl eframe::App for App {
                     bytes: egui::load::Bytes::Static(ICON),
                 })
                 .max_size(egui::Vec2::new(ICON_WIDTH as f32, ICON_HEIGHT as f32)),
-            );
+            )
         });
     }
 }
@@ -52,12 +134,8 @@ fn main() -> Result<()> {
                     width: ICON_WIDTH,
                     height: ICON_HEIGHT,
                 })),
-                inner_size: Some(egui::Vec2::new(
-                    ICON_WIDTH as f32 + 300.,
-                    ICON_HEIGHT as f32 + 300.,
-                )),
+                inner_size: Some(egui::Vec2::new(ICON_WIDTH as f32, ICON_HEIGHT as f32 + 50.)),
                 resizable: Some(false),
-                decorations: Some(true),
                 ..Default::default()
             },
             ..Default::default()
@@ -65,7 +143,7 @@ fn main() -> Result<()> {
         Box::new(|cc| {
             set_font(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Box::new(App::default())
+            Box::new(App::new())
         }),
     )
     .map_err(|err| eyre!("{}", err))?;

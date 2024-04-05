@@ -12,3 +12,5 @@ eframe = "0.27.2"                                          #EGUI运行框架
 egui_extras = { version = "0.27.2", features = ["image"] } #EGUI扩展
 
 image = "0.25.1" #图像库
+
+opener = "0.7.0" #用系统默认方式打开对象
