@@ -12,18 +12,24 @@ use eyre::{eyre, Result};
 
 use eframe::egui;
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
+use rustls::RootCertStore;
 use serde::{Deserialize, Serialize};
-use share::{x509_dns_name_from_der, ArcMutex};
+use share::ArcMutex;
 use uuid::Uuid;
 
 const ICON: &[u8] = include_bytes!("../../../assets/icon/node_network_icon.png");
 const ICON_WIDTH: u32 = 512;
 const ICON_HEIGHT: u32 = 512;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct RootNode {
+    node_name: String,
+    socket_addr: SocketAddr,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct Config {
     node_name: String,
-    root_node_socket_addr: SocketAddr,
+    root_node: RootNode,
 }
 
 #[derive(Clone)]
@@ -71,18 +77,33 @@ struct App {
     side_bar_is_show: bool,
     connect_root_node_ui_is_enable: ArcMutex<bool>,
     endpoint: ArcMutex<Option<Endpoint>>,
+    root_cert_store: RootCertStore,
     root_node_connection: ArcMutex<Option<Connection>>,
 }
 impl App {
     fn new() -> Self {
         let mut config = None;
         let endpoint = ArcMutex::new(None);
+        let mut root_cert_store = RootCertStore::empty();
         let state_bar_message = ArcMutex::new(None);
         let connect_root_node_ui_is_enable = ArcMutex::new(false);
         //加载配置
         match load_config() {
             Ok(cfg) => config = Some(cfg),
-            Err(_) => (),
+            Err(err) => {
+                *state_bar_message.lock() =
+                    Some(Message::Error(format!("加载配置失败！原因：{}", err)))
+            }
+        }
+        //加载证书目录证书
+        match load_certs_path_root_cert_store() {
+            Ok(rcs) => root_cert_store = rcs,
+            Err(err) => {
+                *state_bar_message.lock() = Some(Message::Error(format!(
+                    "加载证书目录证书失败！原因：{}",
+                    err
+                )))
+            }
         }
         //创建节点
         tokio::spawn({
@@ -90,8 +111,15 @@ impl App {
             let state_bar_message = state_bar_message.clone();
             let connect_root_node_ui_is_enable = connect_root_node_ui_is_enable.clone();
             async move {
-                match new_endpoint(endpoint) {
-                    Ok(_) => *connect_root_node_ui_is_enable.lock() = true,
+                match new_endpoint() {
+                    Ok(ep) => {
+                        {
+                            *endpoint.lock() = Some(ep);
+                        }
+                        {
+                            *connect_root_node_ui_is_enable.lock() = true;
+                        }
+                    }
                     Err(_) => {
                         *state_bar_message.lock() =
                             Some(Message::Error("创建节点失败！".to_owned()))
@@ -109,6 +137,7 @@ impl App {
             side_bar_is_show: false,
             connect_root_node_ui_is_enable,
             endpoint,
+            root_cert_store,
             root_node_connection: ArcMutex::new(None),
         }
     }
@@ -163,77 +192,88 @@ impl eframe::App for App {
         });
         egui::TopBottomPanel::bottom("StateBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.add_enabled_ui(
-                    {
-                        let a = self.connect_root_node_ui_is_enable.lock().clone();
-                        a
-                    },
-                    |ui| {
-                        if ui.button("🖧 连接根节点").clicked() {
-                            if let (Some(endpoint), Some(config)) = (
-                                {
-                                    let a = self.endpoint.lock().clone();
-                                    a
-                                },
-                                self.config.clone(),
-                            ) {
-                                {
-                                    *self.connect_root_node_ui_is_enable.lock() = false;
-                                }
-                                {
-                                    *self.root_node_connection_state.lock() =
-                                        ConnectionState::Connecting;
-                                }
-                                tokio::spawn({
-                                    let root_node_connection = self.root_node_connection.clone();
-                                    let connect_root_node_ui_is_enable =
-                                        self.connect_root_node_ui_is_enable.clone();
-                                    let state_bar_message = self.state_bar_message.clone();
-                                    let root_node_connection_state =
-                                        self.root_node_connection_state.clone();
-                                    async move {
-                                        match connect_root_node(
-                                            config,
-                                            endpoint,
-                                            root_node_connection,
-                                        )
-                                        .await
+                if ui
+                    .add_enabled(
+                        {
+                            let a = self.connect_root_node_ui_is_enable.lock().clone();
+                            a
+                        },
+                        egui::Button::new("🖧 连接根节点"),
+                    )
+                    .clicked()
+                {
+                    if let (Some(endpoint), Some(config)) = (
+                        {
+                            let a = self.endpoint.lock().clone();
+                            a
+                        },
+                        self.config.clone(),
+                    ) {
+                        {
+                            *self.connect_root_node_ui_is_enable.lock() = false;
+                        }
+                        {
+                            *self.root_node_connection_state.lock() = ConnectionState::Connecting;
+                        }
+                        tokio::spawn({
+                            let root_node_connection = self.root_node_connection.clone();
+                            let connect_root_node_ui_is_enable =
+                                self.connect_root_node_ui_is_enable.clone();
+                            let state_bar_message = self.state_bar_message.clone();
+                            let root_node_connection_state =
+                                self.root_node_connection_state.clone();
+                            let root_cert_store = self.root_cert_store.clone();
+                            async move {
+                                match connect_root_node(config, endpoint, root_cert_store).await {
+                                    Ok(connection) => {
                                         {
-                                            Ok(_) => {
-                                                {
-                                                    *root_node_connection_state.lock() =
-                                                        ConnectionState::Connected;
-                                                }
-                                                {
-                                                    *state_bar_message.lock() =
-                                                        Some(Message::Info(
-                                                            "连接根节点成功啦~✨，快去玩耍吧~"
-                                                                .to_owned(),
-                                                        ));
-                                                }
-                                            }
-                                            Err(_) => {
-                                                {
-                                                    *connect_root_node_ui_is_enable.lock() = true;
-                                                }
-                                                {
-                                                    *root_node_connection_state.lock() =
-                                                        ConnectionState::Disconnect;
-                                                }
-                                                {
-                                                    *state_bar_message.lock() =
-                                                        Some(Message::Error(
-                                                            "连接根节点失败惹！可恶💢".to_owned(),
-                                                        ));
-                                                }
-                                            }
+                                            *root_node_connection.lock() = Some(connection.clone());
+                                        }
+                                        {
+                                            *root_node_connection_state.lock() =
+                                                ConnectionState::Connected;
+                                        }
+                                        {
+                                            *state_bar_message.lock() = Some(Message::Info(
+                                                "连接根节点成功啦~✨，快去玩耍吧~".to_owned(),
+                                            ));
+                                        }
+                                        connection.closed().await;
+                                        {
+                                            *root_node_connection.lock() = None;
+                                        }
+                                        {
+                                            *connect_root_node_ui_is_enable.lock() = true;
+                                        }
+                                        {
+                                            *root_node_connection_state.lock() =
+                                                ConnectionState::Disconnect;
+                                        }
+                                        {
+                                            *state_bar_message.lock() = Some(Message::Error(
+                                                "根节点断开连接惹！盖亚！💢".to_owned(),
+                                            ));
                                         }
                                     }
-                                });
+                                    Err(_) => {
+                                        {
+                                            *connect_root_node_ui_is_enable.lock() = true;
+                                        }
+                                        {
+                                            *root_node_connection_state.lock() =
+                                                ConnectionState::Disconnect;
+                                        }
+                                        {
+                                            *state_bar_message.lock() = Some(Message::Error(
+                                                "连接根节点失败惹！可恶💢".to_owned(),
+                                            ));
+                                        }
+                                    }
+                                }
                             }
-                        }
-                    },
-                );
+                        });
+                    }
+                }
                 match {
                     let a = self.root_node_connection_state.lock().clone();
                     a
@@ -352,8 +392,11 @@ fn set_font(ctx: &egui::Context) {
 fn load_config() -> Result<Config> {
     //解析配置文件
     let mut config = Config {
-        node_name: "无名氏".to_string(),
-        root_node_socket_addr: "127.0.0.1:10270".parse()?,
+        node_name: "无名氏".to_owned(),
+        root_node: RootNode {
+            node_name: "root_node".to_owned(),
+            socket_addr: "127.0.0.1:10270".parse()?,
+        },
     };
     let config_file_path = PathBuf::from("./config.json");
     match File::open(config_file_path.clone()) {
@@ -371,32 +414,9 @@ fn load_config() -> Result<Config> {
     }
     Ok(config)
 }
-fn new_endpoint(endpoint: ArcMutex<Option<Endpoint>>) -> Result<()> {
-    let rcgen::CertifiedKey { cert, key_pair } =
-        rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
-    let mut transport_config = TransportConfig::default();
-    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
-    {
-        *endpoint.lock() = Some(Endpoint::server(
-            ServerConfig::with_single_cert(
-                vec![rustls::Certificate(cert.der().to_vec())],
-                rustls::PrivateKey(key_pair.serialize_der()),
-            )?
-            .transport_config(Arc::new(transport_config))
-            .clone(),
-            "0.0.0.0:0".parse()?,
-        )?);
-    }
-    Ok(())
-}
-async fn connect_root_node(
-    config: Config,
-    endpoint: Endpoint,
-    root_node_connection: ArcMutex<Option<Connection>>,
-) -> Result<()> {
-    let mut root_cert_store = rustls::RootCertStore::empty();
+fn load_certs_path_root_cert_store() -> Result<RootCertStore> {
+    let mut root_cert_store = RootCertStore::empty();
     let cert_dir_path = PathBuf::from("./certs/");
-    let mut cert_dns_name = String::new();
     create_dir_all(cert_dir_path.clone())?;
     for dir_entry in cert_dir_path.read_dir()? {
         if let Ok(dir_entry) = dir_entry {
@@ -405,25 +425,38 @@ async fn connect_root_node(
                 if extension == "cer" {
                     let mut root_node_cert = Vec::new();
                     File::open(path)?.read_to_end(&mut root_node_cert)?;
-                    cert_dns_name = x509_dns_name_from_der(&root_node_cert)?;
                     root_cert_store.add(&rustls::Certificate(root_node_cert))?;
                 }
             }
         }
     }
-    if root_cert_store.is_empty() {
-        return Err(eyre!("没有找到证书"));
-    }
-    {
-        *root_node_connection.lock() = Some(
-            endpoint
-                .connect_with(
-                    ClientConfig::with_root_certificates(root_cert_store),
-                    config.root_node_socket_addr,
-                    &cert_dns_name,
-                )?
-                .await?,
-        );
-    }
-    Ok(())
+    Ok(root_cert_store)
+}
+fn new_endpoint() -> Result<Endpoint> {
+    let rcgen::CertifiedKey { cert, key_pair } =
+        rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
+    let mut transport_config = TransportConfig::default();
+    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+    Ok(Endpoint::server(
+        ServerConfig::with_single_cert(
+            vec![rustls::Certificate(cert.der().to_vec())],
+            rustls::PrivateKey(key_pair.serialize_der()),
+        )?
+        .transport_config(Arc::new(transport_config))
+        .clone(),
+        "0.0.0.0:0".parse()?,
+    )?)
+}
+async fn connect_root_node(
+    config: Config,
+    endpoint: Endpoint,
+    root_cert_store: RootCertStore,
+) -> Result<Connection> {
+    Ok(endpoint
+        .connect_with(
+            ClientConfig::with_root_certificates(root_cert_store),
+            config.root_node.socket_addr,
+            &config.root_node.node_name,
+        )?
+        .await?)
 }
