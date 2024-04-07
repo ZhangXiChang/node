@@ -251,7 +251,7 @@ impl eframe::App for App {
                                         }
                                         {
                                             *state_bar_message.lock() = Some(Message::Info(
-                                                "根节点断开连接惹！盖亚！💢".to_owned(),
+                                                "根节点断开连接惹！不要离开我呀~😭".to_owned(),
                                             ));
                                         }
                                     }
@@ -294,9 +294,7 @@ impl eframe::App for App {
                     a
                 } {
                     match msg {
-                        Message::Info(msg_str) => {
-                            ui.colored_label(egui::Color32::LIGHT_GRAY, msg_str)
-                        }
+                        Message::Info(msg_str) => ui.colored_label(egui::Color32::GRAY, msg_str),
                         Message::Error(msg_str) => {
                             ui.colored_label(egui::Color32::LIGHT_RED, msg_str)
                         }
