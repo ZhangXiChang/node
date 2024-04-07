@@ -250,7 +250,7 @@ impl eframe::App for App {
                                                 ConnectionState::Disconnect;
                                         }
                                         {
-                                            *state_bar_message.lock() = Some(Message::Error(
+                                            *state_bar_message.lock() = Some(Message::Info(
                                                 "根节点断开连接惹！盖亚！💢".to_owned(),
                                             ));
                                         }
