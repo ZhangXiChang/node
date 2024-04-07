@@ -1,15 +1,32 @@
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    fs::{create_dir_all, File},
+    io::Read,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use eyre::{eyre, Result};
 
 use eframe::egui;
-use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
+use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
+use serde::{Deserialize, Serialize};
+use share::{x509_dns_name_from_der, ArcMutex};
 use uuid::Uuid;
 
 const ICON: &[u8] = include_bytes!("../../../assets/icon/node_network_icon.png");
 const ICON_WIDTH: u32 = 512;
 const ICON_HEIGHT: u32 = 512;
 
+#[derive(Serialize, Deserialize, Clone)]
+struct Config {
+    node_name: String,
+    root_node_socket_addr: SocketAddr,
+}
+
+#[derive(Clone)]
 enum ConnectionState {
     Connected,
     Disconnect,
@@ -45,39 +62,55 @@ impl From<UIMode> for UIModeSwitchButtonText {
 }
 
 struct App {
-    root_node_connection_state: ConnectionState,
-    state_bar_message: Option<Message>,
+    config: Option<Config>,
+    root_node_connection_state: ArcMutex<ConnectionState>,
+    state_bar_message: ArcMutex<Option<Message>>,
     ui_mode: UIMode,
     ui_mode_switch_button_text: UIModeSwitchButtonText,
     ui_mode_switch_inner_size: Option<egui::Vec2>,
     side_bar_is_show: bool,
-    endpoint: Endpoint,
+    connect_root_node_ui_is_enable: ArcMutex<bool>,
+    endpoint: ArcMutex<Option<Endpoint>>,
+    root_node_connection: ArcMutex<Option<Connection>>,
 }
 impl App {
-    fn new() -> Result<Self> {
+    fn new() -> Self {
+        let mut config = None;
+        let endpoint = ArcMutex::new(None);
+        let state_bar_message = ArcMutex::new(None);
+        let connect_root_node_ui_is_enable = ArcMutex::new(false);
+        //加载配置
+        match load_config() {
+            Ok(cfg) => config = Some(cfg),
+            Err(_) => (),
+        }
         //创建节点
-        let rcgen::CertifiedKey { cert, key_pair } =
-            rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
-        let mut transport_config = TransportConfig::default();
-        transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
-        let endpoint = Endpoint::server(
-            ServerConfig::with_single_cert(
-                vec![rustls::Certificate(cert.der().to_vec())],
-                rustls::PrivateKey(key_pair.serialize_der()),
-            )?
-            .transport_config(Arc::new(transport_config))
-            .clone(),
-            "0.0.0.0:0".parse()?,
-        )?;
-        Ok(Self {
-            root_node_connection_state: ConnectionState::Disconnect,
-            state_bar_message: None,
+        tokio::spawn({
+            let endpoint = endpoint.clone();
+            let state_bar_message = state_bar_message.clone();
+            let connect_root_node_ui_is_enable = connect_root_node_ui_is_enable.clone();
+            async move {
+                match new_endpoint(endpoint) {
+                    Ok(_) => *connect_root_node_ui_is_enable.lock() = true,
+                    Err(_) => {
+                        *state_bar_message.lock() =
+                            Some(Message::Error("创建节点失败！".to_owned()))
+                    }
+                }
+            }
+        });
+        Self {
+            config,
+            root_node_connection_state: ArcMutex::new(ConnectionState::Disconnect),
+            state_bar_message,
             ui_mode: UIMode::Fold,
             ui_mode_switch_button_text: UIMode::Fold.into(),
             ui_mode_switch_inner_size: Some(egui::Vec2::new(1150., 750.)),
             side_bar_is_show: false,
+            connect_root_node_ui_is_enable,
             endpoint,
-        })
+            root_node_connection: ArcMutex::new(None),
+        }
     }
 }
 impl eframe::App for App {
@@ -122,7 +155,7 @@ impl eframe::App for App {
                         ui.label("版本：0.1.0");
                         ui.label("作者：✨张喜昌✨");
                         if ui.link("源代码").clicked() {
-                            let _ = opener::open("https://github.com/ZhangXiChang/node-network");
+                            opener::open("https://github.com/ZhangXiChang/node-network").unwrap();
                         }
                     });
                 });
@@ -130,17 +163,81 @@ impl eframe::App for App {
         });
         egui::TopBottomPanel::bottom("StateBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("🖧 连接根节点").clicked() {
-                    //TODO 连接根节点实现
-                    tokio::spawn({
-                        //let endpoint = self.endpoint.clone();
-                        async {
-                            //endpoint.connect_with(config, addr, server_name);
-                            eyre::Ok(())
+                ui.add_enabled_ui(
+                    {
+                        let a = self.connect_root_node_ui_is_enable.lock().clone();
+                        a
+                    },
+                    |ui| {
+                        if ui.button("🖧 连接根节点").clicked() {
+                            if let (Some(endpoint), Some(config)) = (
+                                {
+                                    let a = self.endpoint.lock().clone();
+                                    a
+                                },
+                                self.config.clone(),
+                            ) {
+                                {
+                                    *self.connect_root_node_ui_is_enable.lock() = false;
+                                }
+                                {
+                                    *self.root_node_connection_state.lock() =
+                                        ConnectionState::Connecting;
+                                }
+                                tokio::spawn({
+                                    let root_node_connection = self.root_node_connection.clone();
+                                    let connect_root_node_ui_is_enable =
+                                        self.connect_root_node_ui_is_enable.clone();
+                                    let state_bar_message = self.state_bar_message.clone();
+                                    let root_node_connection_state =
+                                        self.root_node_connection_state.clone();
+                                    async move {
+                                        match connect_root_node(
+                                            config,
+                                            endpoint,
+                                            root_node_connection,
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                {
+                                                    *root_node_connection_state.lock() =
+                                                        ConnectionState::Connected;
+                                                }
+                                                {
+                                                    *state_bar_message.lock() =
+                                                        Some(Message::Info(
+                                                            "连接根节点成功啦~✨，快去玩耍吧~"
+                                                                .to_owned(),
+                                                        ));
+                                                }
+                                            }
+                                            Err(_) => {
+                                                {
+                                                    *connect_root_node_ui_is_enable.lock() = true;
+                                                }
+                                                {
+                                                    *root_node_connection_state.lock() =
+                                                        ConnectionState::Disconnect;
+                                                }
+                                                {
+                                                    *state_bar_message.lock() =
+                                                        Some(Message::Error(
+                                                            "连接根节点失败惹！可恶💢".to_owned(),
+                                                        ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                            }
                         }
-                    });
-                }
-                match self.root_node_connection_state {
+                    },
+                );
+                match {
+                    let a = self.root_node_connection_state.lock().clone();
+                    a
+                } {
                     ConnectionState::Connected => {
                         ui.colored_label(egui::Color32::LIGHT_GREEN, "🌏 根节点已连接")
                     }
@@ -152,7 +249,10 @@ impl eframe::App for App {
                     }
                 };
                 ui.label("|");
-                if let Some(msg) = self.state_bar_message.clone() {
+                if let Some(msg) = {
+                    let a = self.state_bar_message.lock().clone();
+                    a
+                } {
                     match msg {
                         Message::Info(msg_str) => {
                             ui.colored_label(egui::Color32::LIGHT_GRAY, msg_str)
@@ -223,10 +323,7 @@ async fn main() -> Result<()> {
         Box::new(|cc| {
             set_font(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            match App::new() {
-                Ok(app) => Box::new(app),
-                Err(err) => panic!("{}", err),
-            }
+            Box::new(App::new())
         }),
     )
     .map_err(|err| eyre!("{}", err))?;
@@ -251,4 +348,82 @@ fn set_font(ctx: &egui::Context) {
         .or_default()
         .push("SourceHanSansCN-Bold".to_owned());
     ctx.set_fonts(font_definitions);
+}
+fn load_config() -> Result<Config> {
+    //解析配置文件
+    let mut config = Config {
+        node_name: "无名氏".to_string(),
+        root_node_socket_addr: "127.0.0.1:10270".parse()?,
+    };
+    let config_file_path = PathBuf::from("./config.json");
+    match File::open(config_file_path.clone()) {
+        Ok(mut config_file) => {
+            let mut config_bytes = Vec::new();
+            config_file.read_to_end(&mut config_bytes)?;
+            config = serde_json::from_slice(&config_bytes)?;
+        }
+        Err(_) => {
+            config.serialize(&mut serde_json::Serializer::with_formatter(
+                File::create(config_file_path)?,
+                serde_json::ser::PrettyFormatter::with_indent(b"    "),
+            ))?;
+        }
+    }
+    Ok(config)
+}
+fn new_endpoint(endpoint: ArcMutex<Option<Endpoint>>) -> Result<()> {
+    let rcgen::CertifiedKey { cert, key_pair } =
+        rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
+    let mut transport_config = TransportConfig::default();
+    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+    {
+        *endpoint.lock() = Some(Endpoint::server(
+            ServerConfig::with_single_cert(
+                vec![rustls::Certificate(cert.der().to_vec())],
+                rustls::PrivateKey(key_pair.serialize_der()),
+            )?
+            .transport_config(Arc::new(transport_config))
+            .clone(),
+            "0.0.0.0:0".parse()?,
+        )?);
+    }
+    Ok(())
+}
+async fn connect_root_node(
+    config: Config,
+    endpoint: Endpoint,
+    root_node_connection: ArcMutex<Option<Connection>>,
+) -> Result<()> {
+    let mut root_cert_store = rustls::RootCertStore::empty();
+    let cert_dir_path = PathBuf::from("./certs/");
+    let mut cert_dns_name = String::new();
+    create_dir_all(cert_dir_path.clone())?;
+    for dir_entry in cert_dir_path.read_dir()? {
+        if let Ok(dir_entry) = dir_entry {
+            let path = dir_entry.path();
+            if let Some(extension) = path.extension() {
+                if extension == "cer" {
+                    let mut root_node_cert = Vec::new();
+                    File::open(path)?.read_to_end(&mut root_node_cert)?;
+                    cert_dns_name = x509_dns_name_from_der(&root_node_cert)?;
+                    root_cert_store.add(&rustls::Certificate(root_node_cert))?;
+                }
+            }
+        }
+    }
+    if root_cert_store.is_empty() {
+        return Err(eyre!("没有找到证书"));
+    }
+    {
+        *root_node_connection.lock() = Some(
+            endpoint
+                .connect_with(
+                    ClientConfig::with_root_certificates(root_cert_store),
+                    config.root_node_socket_addr,
+                    &cert_dns_name,
+                )?
+                .await?,
+        );
+    }
+    Ok(())
 }

@@ -5,6 +5,6 @@ edition = "2021"
 
 [dependencies]
 eyre = "0.6.12"                                     #错误报告
-clap = { version = "4.5.3", features = ["derive"] } #命令行参数解析
+clap = { version = "4.5.4", features = ["derive"] } #命令行参数解析
 
-rcgen = "0.12.1" #自签名X.509证书生成
+rcgen = "0.13.1" #自签名X.509证书生成
