@@ -79,6 +79,8 @@ struct App {
     endpoint: ArcMutex<Option<Endpoint>>,
     root_cert_store: RootCertStore,
     root_node_connection: ArcMutex<Option<Connection>>,
+    chat_input_str: String,
+    chat_bar_text_list: Vec<String>,
 }
 impl App {
     fn new() -> Self {
@@ -139,6 +141,8 @@ impl App {
             endpoint,
             root_cert_store,
             root_node_connection: ArcMutex::new(None),
+            chat_input_str: String::new(),
+            chat_bar_text_list: vec![],
         }
     }
 }
@@ -156,7 +160,7 @@ impl eframe::App for App {
                             self.ui_mode_switch_button_text = self.ui_mode.clone().into();
                             if let Some(self_inner_size) = self.ui_mode_switch_inner_size {
                                 let inner_size =
-                                    ctx.input(|is| is.viewport().inner_rect).map(|v| v.size());
+                                    ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
                                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
                                     self_inner_size,
                                 ));
@@ -169,7 +173,7 @@ impl eframe::App for App {
                             self.ui_mode_switch_button_text = self.ui_mode.clone().into();
                             if let Some(self_inner_size) = self.ui_mode_switch_inner_size {
                                 let inner_size =
-                                    ctx.input(|is| is.viewport().inner_rect).map(|v| v.size());
+                                    ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
                                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
                                     self_inner_size,
                                 ));
@@ -308,7 +312,32 @@ impl eframe::App for App {
             });
         }
         egui::CentralPanel::default().show(ctx, |ui| match self.ui_mode {
-            UIMode::Unfold => (),
+            UIMode::Unfold => {
+                egui::TopBottomPanel::bottom("CentralPanel-BottomPanel").show_inside(ui, |ui| {
+                    ui.add_space(10.);
+                    let text_input = ui.add(
+                        egui::TextEdit::singleline(&mut self.chat_input_str)
+                            .min_size(egui::Vec2::new(ui.available_width(), 0.)),
+                    );
+                    if text_input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        text_input.request_focus();
+                        self.chat_bar_text_list.push(self.chat_input_str.clone());
+                        self.chat_input_str.clear();
+                    }
+                });
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for text in self.chat_bar_text_list.iter() {
+                                ui.group(|ui| {
+                                    ui.label(text);
+                                });
+                            }
+                        });
+                });
+            }
             UIMode::Fold => {
                 ui.horizontal_top(|ui| {
                     ui.add(
