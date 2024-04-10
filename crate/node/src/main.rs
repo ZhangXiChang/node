@@ -11,7 +11,7 @@ use std::{
 use eyre::{eyre, Result};
 
 use eframe::egui;
-use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
+use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
 use rustls::RootCertStore;
 use serde::{Deserialize, Serialize};
 use share::ArcMutex;
@@ -55,16 +55,22 @@ impl From<UIModeSwitchButtonText> for String {
 
 #[derive(Clone)]
 enum UIMode {
-    Unfold,
     Fold,
+    Unfold,
 }
 impl From<UIMode> for UIModeSwitchButtonText {
     fn from(value: UIMode) -> Self {
         match value {
-            UIMode::Unfold => Self("🗕 折叠程序".to_owned()),
             UIMode::Fold => Self("🗖 展开程序".to_owned()),
+            UIMode::Unfold => Self("🗕 折叠程序".to_owned()),
         }
     }
+}
+
+#[derive(PartialEq)]
+enum ModeView {
+    Readme,
+    Connect,
 }
 
 struct App {
@@ -72,9 +78,10 @@ struct App {
     root_node_connection_state: ArcMutex<ConnectionState>,
     state_bar_message: ArcMutex<Option<Message>>,
     ui_mode: UIMode,
+    fold_mode_current_view: ModeView,
     ui_mode_switch_button_text: UIModeSwitchButtonText,
     ui_mode_switch_inner_size: Option<egui::Vec2>,
-    side_bar_is_show: bool,
+    left_side_bar_is_show: bool,
     connect_root_node_ui_is_enable: ArcMutex<bool>,
     endpoint: ArcMutex<Option<Endpoint>>,
     root_cert_store: RootCertStore,
@@ -134,9 +141,10 @@ impl App {
             root_node_connection_state: ArcMutex::new(ConnectionState::Disconnect),
             state_bar_message,
             ui_mode: UIMode::Fold,
+            fold_mode_current_view: ModeView::Readme,
             ui_mode_switch_button_text: UIMode::Fold.into(),
             ui_mode_switch_inner_size: Some(egui::Vec2::new(1150., 750.)),
-            side_bar_is_show: false,
+            left_side_bar_is_show: false,
             connect_root_node_ui_is_enable,
             endpoint,
             root_cert_store,
@@ -145,139 +153,132 @@ impl App {
             chat_bar_text_list: vec![],
         }
     }
+    fn connect_root_node_for_tokio(&self, config: Config, endpoint: Endpoint) {
+        tokio::spawn({
+            let root_node_connection = self.root_node_connection.clone();
+            let connect_root_node_ui_is_enable = self.connect_root_node_ui_is_enable.clone();
+            let state_bar_message = self.state_bar_message.clone();
+            let root_node_connection_state = self.root_node_connection_state.clone();
+            let root_cert_store = self.root_cert_store.clone();
+            async move {
+                match connect_root_node(config, endpoint, root_cert_store).await {
+                    Ok(connection) => {
+                        {
+                            *root_node_connection.lock() = Some(connection.clone());
+                        }
+                        {
+                            *root_node_connection_state.lock() = ConnectionState::Connected;
+                        }
+                        {
+                            *state_bar_message.lock() =
+                                Some(Message::Info("连接根节点成功啦~✨，快去玩耍吧~".to_owned()));
+                        }
+                        connection.closed().await;
+                        {
+                            *root_node_connection.lock() = None;
+                        }
+                        {
+                            *connect_root_node_ui_is_enable.lock() = true;
+                        }
+                        {
+                            *root_node_connection_state.lock() = ConnectionState::Disconnect;
+                        }
+                        {
+                            *state_bar_message.lock() = Some(Message::Info(
+                                "根节点断开连接惹！不要离开我呀~😭".to_owned(),
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        {
+                            *connect_root_node_ui_is_enable.lock() = true;
+                        }
+                        {
+                            *root_node_connection_state.lock() = ConnectionState::Disconnect;
+                        }
+                        {
+                            *state_bar_message.lock() =
+                                Some(Message::Error("连接根节点失败惹！可恶💢".to_owned()));
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(endpoint) = {
+            let a = self.endpoint.lock().clone();
+            a
+        } {
+            endpoint.close(VarInt::from_u32(0), "程序关闭".as_bytes());
+        }
+    }
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("MenuBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .button(String::from(self.ui_mode_switch_button_text.clone()))
-                    .clicked()
-                {
-                    match self.ui_mode {
-                        UIMode::Unfold => {
-                            self.ui_mode = UIMode::Fold;
-                            self.ui_mode_switch_button_text = self.ui_mode.clone().into();
-                            if let Some(self_inner_size) = self.ui_mode_switch_inner_size {
-                                let inner_size =
-                                    ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
-                                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                                    self_inner_size,
-                                ));
-                                self.ui_mode_switch_inner_size = inner_size;
+                ui.menu_button("切换视图", |ui| {
+                    ui.radio_value(
+                        &mut self.fold_mode_current_view,
+                        ModeView::Readme,
+                        "自述视图",
+                    );
+                    ui.radio_value(
+                        &mut self.fold_mode_current_view,
+                        ModeView::Connect,
+                        "连接视图",
+                    );
+                });
+                ui.menu_button("关于", |ui| {
+                    ui.label("版本：0.1.0");
+                    ui.label("作者：✨张喜昌✨");
+                    if ui.link("源代码").clicked() {
+                        opener::open("https://github.com/ZhangXiChang/node-network").unwrap();
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(String::from(self.ui_mode_switch_button_text.clone()))
+                        .clicked()
+                    {
+                        match self.ui_mode {
+                            UIMode::Fold => {
+                                self.ui_mode = UIMode::Unfold;
+                                self.ui_mode_switch_button_text = self.ui_mode.clone().into();
+                                if let Some(self_inner_size) = self.ui_mode_switch_inner_size {
+                                    let inner_size =
+                                        ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                                        self_inner_size,
+                                    ));
+                                    self.ui_mode_switch_inner_size = inner_size;
+                                }
+                                self.left_side_bar_is_show = true;
                             }
-                            self.side_bar_is_show = false;
-                        }
-                        UIMode::Fold => {
-                            self.ui_mode = UIMode::Unfold;
-                            self.ui_mode_switch_button_text = self.ui_mode.clone().into();
-                            if let Some(self_inner_size) = self.ui_mode_switch_inner_size {
-                                let inner_size =
-                                    ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
-                                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                                    self_inner_size,
-                                ));
-                                self.ui_mode_switch_inner_size = inner_size;
+                            UIMode::Unfold => {
+                                self.ui_mode = UIMode::Fold;
+                                self.ui_mode_switch_button_text = self.ui_mode.clone().into();
+                                if let Some(self_inner_size) = self.ui_mode_switch_inner_size {
+                                    let inner_size =
+                                        ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                                        self_inner_size,
+                                    ));
+                                    self.ui_mode_switch_inner_size = inner_size;
+                                }
+                                self.left_side_bar_is_show = false;
                             }
-                            self.side_bar_is_show = true;
                         }
                     }
-                }
-                ui.menu_button("关于", |ui| {
-                    ui.vertical(|ui| {
-                        ui.label("版本：0.1.0");
-                        ui.label("作者：✨张喜昌✨");
-                        if ui.link("源代码").clicked() {
-                            opener::open("https://github.com/ZhangXiChang/node-network").unwrap();
-                        }
-                    });
                 });
             });
         });
         egui::TopBottomPanel::bottom("StateBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        {
-                            let a = self.connect_root_node_ui_is_enable.lock().clone();
-                            a
-                        },
-                        egui::Button::new("🖧 连接根节点"),
-                    )
-                    .clicked()
-                {
-                    if let (Some(endpoint), Some(config)) = (
-                        {
-                            let a = self.endpoint.lock().clone();
-                            a
-                        },
-                        self.config.clone(),
-                    ) {
-                        {
-                            *self.connect_root_node_ui_is_enable.lock() = false;
-                        }
-                        {
-                            *self.root_node_connection_state.lock() = ConnectionState::Connecting;
-                        }
-                        tokio::spawn({
-                            let root_node_connection = self.root_node_connection.clone();
-                            let connect_root_node_ui_is_enable =
-                                self.connect_root_node_ui_is_enable.clone();
-                            let state_bar_message = self.state_bar_message.clone();
-                            let root_node_connection_state =
-                                self.root_node_connection_state.clone();
-                            let root_cert_store = self.root_cert_store.clone();
-                            async move {
-                                match connect_root_node(config, endpoint, root_cert_store).await {
-                                    Ok(connection) => {
-                                        {
-                                            *root_node_connection.lock() = Some(connection.clone());
-                                        }
-                                        {
-                                            *root_node_connection_state.lock() =
-                                                ConnectionState::Connected;
-                                        }
-                                        {
-                                            *state_bar_message.lock() = Some(Message::Info(
-                                                "连接根节点成功啦~✨，快去玩耍吧~".to_owned(),
-                                            ));
-                                        }
-                                        connection.closed().await;
-                                        {
-                                            *root_node_connection.lock() = None;
-                                        }
-                                        {
-                                            *connect_root_node_ui_is_enable.lock() = true;
-                                        }
-                                        {
-                                            *root_node_connection_state.lock() =
-                                                ConnectionState::Disconnect;
-                                        }
-                                        {
-                                            *state_bar_message.lock() = Some(Message::Info(
-                                                "根节点断开连接惹！不要离开我呀~😭".to_owned(),
-                                            ));
-                                        }
-                                    }
-                                    Err(_) => {
-                                        {
-                                            *connect_root_node_ui_is_enable.lock() = true;
-                                        }
-                                        {
-                                            *root_node_connection_state.lock() =
-                                                ConnectionState::Disconnect;
-                                        }
-                                        {
-                                            *state_bar_message.lock() = Some(Message::Error(
-                                                "连接根节点失败惹！可恶💢".to_owned(),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                }
+                ui.label("根节点状态:");
                 match {
                     let a = self.root_node_connection_state.lock().clone();
                     a
@@ -306,22 +307,84 @@ impl eframe::App for App {
                 }
             });
         });
-        if self.side_bar_is_show {
-            egui::SidePanel::left("SideBar").show(ctx, |ui| {
-                ui.label("侧边栏");
+        if self.left_side_bar_is_show {
+            egui::SidePanel::left("LeftSideBar").show(ctx, |_ui| {
+                //TODO 展开模式侧边栏
             });
         }
         egui::CentralPanel::default().show(ctx, |ui| match self.ui_mode {
+            UIMode::Fold => match self.fold_mode_current_view {
+                ModeView::Readme => {
+                    ui.horizontal_top(|ui| {
+                        ui.add(
+                            egui::Image::new(egui::ImageSource::Bytes {
+                                uri: Cow::default(),
+                                bytes: egui::load::Bytes::Static(ICON),
+                            })
+                            .max_size(egui::Vec2::new(
+                                ICON_WIDTH as f32 * 0.3,
+                                ICON_HEIGHT as f32 * 0.3,
+                            )),
+                        );
+                        ui.vertical_centered(|ui| {
+                            ui.heading("节点网络");
+                            ui.add_space(10.);
+                            ui.label("版本：0.1.0");
+                            ui.label("作者：✨张喜昌✨");
+                            if ui.link("源代码").clicked() {
+                                let _ =
+                                    opener::open("https://github.com/ZhangXiChang/node-network");
+                            }
+                        });
+                    });
+                    ui.label(
+                        "=====================================================================",
+                    );
+                    ui.vertical_centered(|ui| {
+                        ui.label("这里是作者玩耍的地方，✨欸嘿✨");
+                    });
+                }
+                ModeView::Connect => {
+                    //TODO 连接视图界面设计
+                    if ui
+                        .add_enabled(
+                            {
+                                let a = self.connect_root_node_ui_is_enable.lock().clone();
+                                a
+                            },
+                            egui::Button::new("🖧 连接根节点"),
+                        )
+                        .clicked()
+                    {
+                        if let (Some(endpoint), Some(config)) = (
+                            {
+                                let a = self.endpoint.lock().clone();
+                                a
+                            },
+                            self.config.clone(),
+                        ) {
+                            {
+                                *self.connect_root_node_ui_is_enable.lock() = false;
+                            }
+                            {
+                                *self.root_node_connection_state.lock() =
+                                    ConnectionState::Connecting;
+                            }
+                            self.connect_root_node_for_tokio(config, endpoint);
+                        }
+                    }
+                }
+            },
             UIMode::Unfold => {
                 egui::TopBottomPanel::bottom("CentralPanel-BottomPanel").show_inside(ui, |ui| {
                     ui.add_space(10.);
                     let text_input = ui.add(
-                        egui::TextEdit::singleline(&mut self.chat_input_str)
-                            .min_size(egui::Vec2::new(ui.available_width(), 0.)),
+                        egui::TextEdit::multiline(&mut self.chat_input_str)
+                            .desired_width(ui.available_width()),
                     );
-                    if text_input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        text_input.request_focus();
-                        self.chat_bar_text_list.push(self.chat_input_str.clone());
+                    if text_input.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.chat_bar_text_list
+                            .push(self.chat_input_str.trim().to_owned());
                         self.chat_input_str.clear();
                     }
                 });
@@ -331,38 +394,17 @@ impl eframe::App for App {
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             for text in self.chat_bar_text_list.iter() {
-                                ui.group(|ui| {
-                                    ui.label(text);
+                                ui.horizontal(|ui| {
+                                    //TODO 实现用户头像
+                                    if let Some(config) = &self.config {
+                                        ui.label(format!("{}", config.node_name));
+                                    }
+                                    ui.group(|ui| {
+                                        ui.add(egui::Label::new(text).wrap(true));
+                                    });
                                 });
                             }
                         });
-                });
-            }
-            UIMode::Fold => {
-                ui.horizontal_top(|ui| {
-                    ui.add(
-                        egui::Image::new(egui::ImageSource::Bytes {
-                            uri: Cow::default(),
-                            bytes: egui::load::Bytes::Static(ICON),
-                        })
-                        .max_size(egui::Vec2::new(
-                            ICON_WIDTH as f32 * 0.3,
-                            ICON_HEIGHT as f32 * 0.3,
-                        )),
-                    );
-                    ui.vertical_centered(|ui| {
-                        ui.heading("节点网络");
-                        ui.add_space(10.);
-                        ui.label("版本：0.1.0");
-                        ui.label("作者：✨张喜昌✨");
-                        if ui.link("源代码").clicked() {
-                            let _ = opener::open("https://github.com/ZhangXiChang/node-network");
-                        }
-                    });
-                });
-                ui.label("======================================================================");
-                ui.vertical_centered(|ui| {
-                    ui.label("这里是作者玩耍的地方，✨欸嘿✨");
                 });
             }
         });
@@ -381,7 +423,7 @@ async fn main() -> Result<()> {
                     width: ICON_WIDTH,
                     height: ICON_HEIGHT,
                 })),
-                inner_size: Some(egui::Vec2::new(ICON_WIDTH as f32, ICON_HEIGHT as f32 + 50.)),
+                inner_size: Some(egui::Vec2::new(500., 500. + 50.)),
                 resizable: Some(false),
                 ..Default::default()
             },
