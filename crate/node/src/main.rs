@@ -2,7 +2,6 @@ use std::{
     borrow::Cow,
     fs::{create_dir_all, File},
     io::Read,
-    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -13,24 +12,12 @@ use eyre::{eyre, Result};
 use eframe::egui;
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
 use rustls::RootCertStore;
-use serde::{Deserialize, Serialize};
 use share::ArcMutex;
 use uuid::Uuid;
 
 const ICON: &[u8] = include_bytes!("../../../assets/icon/node_network_icon.png");
 const ICON_WIDTH: u32 = 512;
 const ICON_HEIGHT: u32 = 512;
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct RootNode {
-    node_name: String,
-    socket_addr: SocketAddr,
-}
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct Config {
-    node_name: String,
-    root_node: RootNode,
-}
 
 #[derive(Clone)]
 enum ConnectionState {
@@ -73,8 +60,13 @@ enum ModeView {
     Connect,
 }
 
+struct NodeMessage {
+    node_name: String,
+    msg: String,
+}
+
 struct App {
-    config: Option<Config>,
+    //UI状态
     root_node_connection_state: ArcMutex<ConnectionState>,
     state_bar_message: ArcMutex<Option<Message>>,
     ui_mode: UIMode,
@@ -83,41 +75,26 @@ struct App {
     ui_mode_switch_inner_size: Option<egui::Vec2>,
     left_side_bar_is_show: bool,
     connect_root_node_ui_is_enable: ArcMutex<bool>,
+    chat_input_str: String,
+    chat_input_bar_is_enable: ArcMutex<bool>,
+    chat_bar_text_list: Vec<NodeMessage>,
+    ui_root_node_dns_name: String,
+    ui_root_node_socket_addr: String,
+    ui_self_name: String,
+    //通信状态
     endpoint: ArcMutex<Option<Endpoint>>,
     root_cert_store: RootCertStore,
     root_node_connection: ArcMutex<Option<Connection>>,
-    chat_input_str: String,
-    chat_bar_text_list: Vec<String>,
 }
 impl App {
     fn new() -> Self {
-        let mut config = None;
-        let endpoint = ArcMutex::new(None);
-        let mut root_cert_store = RootCertStore::empty();
         let state_bar_message = ArcMutex::new(None);
-        let connect_root_node_ui_is_enable = ArcMutex::new(false);
-        //加载配置
-        match load_config() {
-            Ok(cfg) => config = Some(cfg),
-            Err(err) => {
-                *state_bar_message.lock() =
-                    Some(Message::Error(format!("加载配置失败！原因：{}", err)))
-            }
-        }
-        //加载证书目录证书
-        match load_certs_path_root_cert_store() {
-            Ok(rcs) => root_cert_store = rcs,
-            Err(err) => {
-                *state_bar_message.lock() = Some(Message::Error(format!(
-                    "加载证书目录证书失败！原因：{}",
-                    err
-                )))
-            }
-        }
         //创建节点
+        let endpoint = ArcMutex::new(None);
+        let connect_root_node_ui_is_enable = ArcMutex::new(false);
         tokio::spawn({
-            let endpoint = endpoint.clone();
             let state_bar_message = state_bar_message.clone();
+            let endpoint = endpoint.clone();
             let connect_root_node_ui_is_enable = connect_root_node_ui_is_enable.clone();
             async move {
                 match new_endpoint() {
@@ -136,8 +113,18 @@ impl App {
                 }
             }
         });
+        //加载证书目录证书
+        let mut root_cert_store = RootCertStore::empty();
+        match load_certs_path_root_cert_store() {
+            Ok(rcs) => root_cert_store = rcs,
+            Err(err) => {
+                *state_bar_message.lock() = Some(Message::Error(format!(
+                    "加载证书目录证书失败！原因：{}",
+                    err
+                )))
+            }
+        }
         Self {
-            config,
             root_node_connection_state: ArcMutex::new(ConnectionState::Disconnect),
             state_bar_message,
             ui_mode: UIMode::Fold,
@@ -146,25 +133,42 @@ impl App {
             ui_mode_switch_inner_size: Some(egui::Vec2::new(1150., 750.)),
             left_side_bar_is_show: false,
             connect_root_node_ui_is_enable,
+            chat_input_str: String::new(),
+            chat_input_bar_is_enable: ArcMutex::new(false),
+            chat_bar_text_list: vec![],
+            ui_root_node_dns_name: "root_node".to_owned(),
+            ui_root_node_socket_addr: "127.0.0.1".to_owned(),
+            ui_self_name: String::new(),
             endpoint,
             root_cert_store,
             root_node_connection: ArcMutex::new(None),
-            chat_input_str: String::new(),
-            chat_bar_text_list: vec![],
         }
     }
-    fn connect_root_node_for_tokio(&self, config: Config, endpoint: Endpoint) {
+    fn connect_root_node_for_tokio(&mut self, endpoint: Endpoint) {
         tokio::spawn({
             let root_node_connection = self.root_node_connection.clone();
             let connect_root_node_ui_is_enable = self.connect_root_node_ui_is_enable.clone();
             let state_bar_message = self.state_bar_message.clone();
             let root_node_connection_state = self.root_node_connection_state.clone();
+            let chat_input_bar_is_enable = self.chat_input_bar_is_enable.clone();
             let root_cert_store = self.root_cert_store.clone();
+            let ui_root_node_dns_name = self.ui_root_node_dns_name.clone();
+            let ui_root_node_socket_addr = self.ui_root_node_socket_addr.clone();
             async move {
-                match connect_root_node(config, endpoint, root_cert_store).await {
+                match connect_root_node(
+                    endpoint,
+                    root_cert_store,
+                    ui_root_node_dns_name,
+                    ui_root_node_socket_addr,
+                )
+                .await
+                {
                     Ok(connection) => {
                         {
                             *root_node_connection.lock() = Some(connection.clone());
+                        }
+                        {
+                            *chat_input_bar_is_enable.lock() = true;
                         }
                         {
                             *root_node_connection_state.lock() = ConnectionState::Connected;
@@ -176,6 +180,9 @@ impl App {
                         connection.closed().await;
                         {
                             *root_node_connection.lock() = None;
+                        }
+                        {
+                            *chat_input_bar_is_enable.lock() = false;
                         }
                         {
                             *connect_root_node_ui_is_enable.lock() = true;
@@ -220,17 +227,22 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("MenuBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.menu_button("切换视图", |ui| {
-                    ui.radio_value(
-                        &mut self.fold_mode_current_view,
-                        ModeView::Readme,
-                        "自述视图",
-                    );
-                    ui.radio_value(
-                        &mut self.fold_mode_current_view,
-                        ModeView::Connect,
-                        "连接视图",
-                    );
+                ui.menu_button("切换视图", |ui| match self.ui_mode {
+                    UIMode::Fold => {
+                        ui.radio_value(
+                            &mut self.fold_mode_current_view,
+                            ModeView::Readme,
+                            "自述视图",
+                        );
+                        ui.radio_value(
+                            &mut self.fold_mode_current_view,
+                            ModeView::Connect,
+                            "连接视图",
+                        );
+                    }
+                    UIMode::Unfold => {
+                        ui.label("空");
+                    }
                 });
                 ui.menu_button("关于", |ui| {
                     ui.label("版本：0.1.0");
@@ -346,45 +358,95 @@ impl eframe::App for App {
                 }
                 ModeView::Connect => {
                     //TODO 连接视图界面设计
-                    if ui
-                        .add_enabled(
+                    ui.vertical_centered(|ui| {
+                        ui.add_space((ui.available_height() / 2.) - 70.);
+                        ui.add_enabled_ui(
                             {
                                 let a = self.connect_root_node_ui_is_enable.lock().clone();
                                 a
                             },
-                            egui::Button::new("🖧 连接根节点"),
-                        )
-                        .clicked()
-                    {
-                        if let (Some(endpoint), Some(config)) = (
-                            {
-                                let a = self.endpoint.lock().clone();
+                            |ui| {
+                                ui.allocate_ui(egui::Vec2::new(200., 0.), |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("昵称:");
+                                        ui.text_edit_singleline(&mut self.ui_self_name);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("根节点DNSName:");
+                                        ui.text_edit_singleline(&mut self.ui_root_node_dns_name);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("根节点IP地址:");
+                                        ui.text_edit_singleline(&mut self.ui_root_node_socket_addr);
+                                    });
+                                });
+                                ui.add_enabled_ui(
+                                    !self.ui_self_name.is_empty()
+                                        && !self.ui_root_node_dns_name.is_empty()
+                                        && !self.ui_root_node_socket_addr.is_empty(),
+                                    |ui| {
+                                        if ui.button("🖧 连接根节点").clicked() {
+                                            if let Some(endpoint) = {
+                                                let a = self.endpoint.lock().clone();
+                                                a
+                                            } {
+                                                {
+                                                    *self.connect_root_node_ui_is_enable.lock() =
+                                                        false;
+                                                }
+                                                {
+                                                    *self.root_node_connection_state.lock() =
+                                                        ConnectionState::Connecting;
+                                                }
+                                                self.connect_root_node_for_tokio(endpoint);
+                                            }
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                        ui.add_enabled_ui(
+                            !{
+                                let a = self.connect_root_node_ui_is_enable.lock().clone();
+                                a
+                            } && {
+                                let a = self.root_node_connection.lock().is_some();
                                 a
                             },
-                            self.config.clone(),
-                        ) {
-                            {
-                                *self.connect_root_node_ui_is_enable.lock() = false;
-                            }
-                            {
-                                *self.root_node_connection_state.lock() =
-                                    ConnectionState::Connecting;
-                            }
-                            self.connect_root_node_for_tokio(config, endpoint);
-                        }
-                    }
+                            |ui| {
+                                if ui.button("断开连接").clicked() {
+                                    if let Some(root_node_connection) = {
+                                        let a = self.root_node_connection.lock().clone();
+                                        a
+                                    } {
+                                        root_node_connection
+                                            .close(VarInt::from_u32(0), "手动关闭连接".as_bytes());
+                                    }
+                                }
+                            },
+                        );
+                    });
                 }
             },
             UIMode::Unfold => {
                 egui::TopBottomPanel::bottom("CentralPanel-BottomPanel").show_inside(ui, |ui| {
                     ui.add_space(10.);
-                    let text_input = ui.add(
-                        egui::TextEdit::multiline(&mut self.chat_input_str)
-                            .desired_width(ui.available_width()),
-                    );
-                    if text_input.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.chat_bar_text_list
-                            .push(self.chat_input_str.trim().to_owned());
+                    if ui
+                        .add_enabled(
+                            {
+                                let a = self.chat_input_bar_is_enable.lock().clone();
+                                a
+                            },
+                            egui::TextEdit::multiline(&mut self.chat_input_str)
+                                .desired_width(ui.available_width()),
+                        )
+                        .has_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        self.chat_bar_text_list.push(NodeMessage {
+                            node_name: self.ui_self_name.clone(),
+                            msg: self.chat_input_str.trim().to_owned(),
+                        });
                         self.chat_input_str.clear();
                     }
                 });
@@ -393,14 +455,12 @@ impl eframe::App for App {
                         .auto_shrink(false)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            for text in self.chat_bar_text_list.iter() {
+                            for node_msg in self.chat_bar_text_list.iter() {
                                 ui.horizontal(|ui| {
                                     //TODO 实现用户头像
-                                    if let Some(config) = &self.config {
-                                        ui.label(format!("{}", config.node_name));
-                                    }
+                                    ui.label(node_msg.node_name.clone());
                                     ui.group(|ui| {
-                                        ui.add(egui::Label::new(text).wrap(true));
+                                        ui.add(egui::Label::new(node_msg.msg.clone()).wrap(true));
                                     });
                                 });
                             }
@@ -425,6 +485,7 @@ async fn main() -> Result<()> {
                 })),
                 inner_size: Some(egui::Vec2::new(500., 500. + 50.)),
                 resizable: Some(false),
+                maximize_button: Some(false),
                 ..Default::default()
             },
             ..Default::default()
@@ -458,31 +519,31 @@ fn set_font(ctx: &egui::Context) {
         .push("SourceHanSansCN-Bold".to_owned());
     ctx.set_fonts(font_definitions);
 }
-fn load_config() -> Result<Config> {
-    //解析配置文件
-    let mut config = Config {
-        node_name: "无名氏".to_owned(),
-        root_node: RootNode {
-            node_name: "root_node".to_owned(),
-            socket_addr: "127.0.0.1:10270".parse()?,
-        },
-    };
-    let config_file_path = PathBuf::from("./config.json");
-    match File::open(config_file_path.clone()) {
-        Ok(mut config_file) => {
-            let mut config_bytes = Vec::new();
-            config_file.read_to_end(&mut config_bytes)?;
-            config = serde_json::from_slice(&config_bytes)?;
-        }
-        Err(_) => {
-            config.serialize(&mut serde_json::Serializer::with_formatter(
-                File::create(config_file_path)?,
-                serde_json::ser::PrettyFormatter::with_indent(b"    "),
-            ))?;
-        }
-    }
-    Ok(config)
-}
+// fn load_config() -> Result<Config> {
+//     //解析配置文件
+//     let mut config = Config {
+//         node_name: "无名氏".to_owned(),
+//         root_node: RootNode {
+//             node_name: "root_node".to_owned(),
+//             socket_addr: "127.0.0.1:10270".parse()?,
+//         },
+//     };
+//     let config_file_path = PathBuf::from("./config.json");
+//     match File::open(config_file_path.clone()) {
+//         Ok(mut config_file) => {
+//             let mut config_bytes = Vec::new();
+//             config_file.read_to_end(&mut config_bytes)?;
+//             config = serde_json::from_slice(&config_bytes)?;
+//         }
+//         Err(_) => {
+//             config.serialize(&mut serde_json::Serializer::with_formatter(
+//                 File::create(config_file_path)?,
+//                 serde_json::ser::PrettyFormatter::with_indent(b"    "),
+//             ))?;
+//         }
+//     }
+//     Ok(config)
+// }
 fn load_certs_path_root_cert_store() -> Result<RootCertStore> {
     let mut root_cert_store = RootCertStore::empty();
     let cert_dir_path = PathBuf::from("./certs/");
@@ -517,15 +578,16 @@ fn new_endpoint() -> Result<Endpoint> {
     )?)
 }
 async fn connect_root_node(
-    config: Config,
     endpoint: Endpoint,
     root_cert_store: RootCertStore,
+    root_node_name: String,
+    root_node_socket_addr: String,
 ) -> Result<Connection> {
     Ok(endpoint
         .connect_with(
             ClientConfig::with_root_certificates(root_cert_store),
-            config.root_node.socket_addr,
-            &config.root_node.node_name,
+            root_node_socket_addr.parse()?,
+            &root_node_name,
         )?
         .await?)
 }
