@@ -173,6 +173,45 @@ impl App {
             root_node_connection: ArcMutex::new(None),
         })
     }
+    fn load_config() -> Result<Config> {
+        //初始配置
+        let mut config = Config {
+            user_name: "".to_owned(),
+            root_node_info_list: vec![RootNodeInfo {
+                name: "默认根节点".to_owned(),
+                dns_name: "root_node".to_owned(),
+                socket_addr: "127.0.0.1:10270".parse()?,
+            }],
+        };
+        //解析配置文件
+        let config_file_path = PathBuf::from("./config.json");
+        match File::open(config_file_path.clone()) {
+            Ok(mut config_file) => {
+                let mut config_bytes = Vec::new();
+                config_file.read_to_end(&mut config_bytes)?;
+                config = serde_json::from_slice(&config_bytes)?;
+            }
+            Err(_) => {
+                config.serialize(&mut serde_json::Serializer::with_formatter(
+                    File::create(config_file_path)?,
+                    serde_json::ser::PrettyFormatter::with_indent(b"    "),
+                ))?;
+            }
+        }
+        Ok(config)
+    }
+    fn write_user_name_to_config(user_name: String) -> Result<()> {
+        let config_file_path = PathBuf::from("./config.json");
+        let mut config_bytes = Vec::new();
+        File::open(config_file_path.clone())?.read_to_end(&mut config_bytes)?;
+        let mut config = serde_json::from_slice::<Config>(&config_bytes)?;
+        config.user_name = user_name;
+        config.serialize(&mut serde_json::Serializer::with_formatter(
+            File::create(config_file_path)?,
+            serde_json::ser::PrettyFormatter::with_indent(b"    "),
+        ))?;
+        Ok(())
+    }
     fn window_ui_layout_state_switch_to(
         app_ui_layout_state: AppUILayoutState,
         ctx: &egui::Context,
@@ -299,33 +338,6 @@ impl App {
                 }
             }
         });
-    }
-    fn load_config() -> Result<Config> {
-        //初始配置
-        let mut config = Config {
-            user_name: "".to_owned(),
-            root_node_info_list: vec![RootNodeInfo {
-                name: "默认根节点".to_owned(),
-                dns_name: "root_node".to_owned(),
-                socket_addr: "127.0.0.1:10270".parse()?,
-            }],
-        };
-        //解析配置文件
-        let config_file_path = PathBuf::from("./config.json");
-        match File::open(config_file_path.clone()) {
-            Ok(mut config_file) => {
-                let mut config_bytes = Vec::new();
-                config_file.read_to_end(&mut config_bytes)?;
-                config = serde_json::from_slice(&config_bytes)?;
-            }
-            Err(_) => {
-                config.serialize(&mut serde_json::Serializer::with_formatter(
-                    File::create(config_file_path)?,
-                    serde_json::ser::PrettyFormatter::with_indent(b"    "),
-                ))?;
-            }
-        }
-        Ok(config)
     }
 }
 impl Default for App {
@@ -479,7 +491,21 @@ impl eframe::App for App {
                                 ui.allocate_ui(egui::Vec2::new(200., 0.), |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label("昵称");
-                                        ui.text_edit_singleline(&mut self.config.user_name);
+                                        if ui
+                                            .text_edit_singleline(&mut self.config.user_name)
+                                            .lost_focus()
+                                        {
+                                            match Self::write_user_name_to_config(
+                                                self.config.user_name.clone(),
+                                            ) {
+                                                Ok(_) => (),
+                                                Err(err) => {
+                                                    *self.state_bar.log.lock() = Some(Log::Error(
+                                                        format!("配置保存错误！原因：{}", err),
+                                                    ))
+                                                }
+                                            }
+                                        }
                                     });
                                     ui.horizontal(|ui| {
                                         egui::ComboBox::from_label("根节点")
