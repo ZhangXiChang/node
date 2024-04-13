@@ -14,7 +14,7 @@ use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, V
 use rcgen::CertifiedKey;
 use rustls::{Certificate, PrivateKey, RootCertStore};
 use serde::{Deserialize, Serialize};
-use share::ArcMutex;
+use share_code::ArcMutex;
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
@@ -105,7 +105,7 @@ struct UnFoldCentralPanel {
     chat_bar: ChatBar,
 }
 
-pub struct App {
+pub struct GUI {
     //应用配置
     config: Config,
     //图形界面
@@ -121,7 +121,7 @@ pub struct App {
     endpoint: Endpoint,
     root_node_connection: ArcMutex<Option<Connection>>,
 }
-impl App {
+impl GUI {
     pub fn new() -> Result<Self> {
         Ok(Self {
             config: Self::load_config()?,
@@ -336,7 +336,7 @@ impl App {
         });
     }
 }
-impl Default for App {
+impl Default for GUI {
     fn default() -> Self {
         match Self::new() {
             Ok(selfa) => selfa,
@@ -344,13 +344,13 @@ impl Default for App {
         }
     }
 }
-impl Drop for App {
+impl Drop for GUI {
     fn drop(&mut self) {
         self.endpoint
             .close(VarInt::from_u32(0), "程序关闭".as_bytes());
     }
 }
-impl eframe::App for App {
+impl eframe::App for GUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("MenuBar").show(ctx, |ui| {
             ui.horizontal(|ui| {

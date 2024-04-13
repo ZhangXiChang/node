@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-share = { path = "../share" }       #共享代码
-protocol = { path = "../protocol" } #协议
+share-code = { path = "../share-code" } #共享代码
+protocol = { path = "../protocol" }     #协议
 
 eyre = "0.6.12"                                     #错误报告
 log = "0.4.21"                                      #日志生产者

@@ -1,7 +1,8 @@
-mod app;
+mod gui;
 mod window;
 
 use eyre::Result;
+use gui::GUI;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,7 +17,7 @@ async fn main() -> Result<()> {
             maximize_button: Some(false),
             ..Default::default()
         },
-        app::App::new()?,
+        GUI::new()?,
     )?;
     Ok(())
 }
