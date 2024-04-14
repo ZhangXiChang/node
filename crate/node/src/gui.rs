@@ -83,11 +83,8 @@ struct UnFoldCentralPanel {
 }
 
 pub struct GUInterface {
-    //应用
     system: System,
-    //节点
     node: Node,
-    //图形界面
     menu_bar: MenuBar,
     state_bar: StateBar,
     fold_central_panel: FoldCentralPanel,
