@@ -13,24 +13,24 @@ enum Log {
 }
 
 #[derive(Clone)]
-enum AppUILayoutState {
+enum GUILayoutState {
     Fold,
     Unfold,
 }
 
 #[derive(Clone)]
-struct AppUILayoutStateSwitchButtonText(String);
-impl From<AppUILayoutStateSwitchButtonText> for String {
-    fn from(value: AppUILayoutStateSwitchButtonText) -> Self {
-        let AppUILayoutStateSwitchButtonText(text) = value;
+struct GUILayoutStateSwitchButtonText(String);
+impl From<GUILayoutStateSwitchButtonText> for String {
+    fn from(value: GUILayoutStateSwitchButtonText) -> Self {
+        let GUILayoutStateSwitchButtonText(text) = value;
         text
     }
 }
-impl From<AppUILayoutState> for AppUILayoutStateSwitchButtonText {
-    fn from(value: AppUILayoutState) -> Self {
+impl From<GUILayoutState> for GUILayoutStateSwitchButtonText {
+    fn from(value: GUILayoutState) -> Self {
         match value {
-            AppUILayoutState::Fold => Self("🗖 展开程序".to_owned()),
-            AppUILayoutState::Unfold => Self("🗕 折叠程序".to_owned()),
+            GUILayoutState::Fold => Self("🗖 展开程序".to_owned()),
+            GUILayoutState::Unfold => Self("🗕 折叠程序".to_owned()),
         }
     }
 }
@@ -66,7 +66,7 @@ struct ChatBar {
 }
 
 struct MenuBar {
-    app_ui_layout_state_switch_button_text: AppUILayoutStateSwitchButtonText,
+    gui_layout_state_switch_button_text: GUILayoutStateSwitchButtonText,
 }
 
 struct StateBar {
@@ -89,8 +89,8 @@ pub struct GUInterface {
     state_bar: StateBar,
     fold_central_panel: FoldCentralPanel,
     unfold_central_panel: UnFoldCentralPanel,
-    ui_layout_state: AppUILayoutState,
-    ui_layout_state_switch_next_window_inner_size: Option<egui::Vec2>,
+    gui_layout_state: GUILayoutState,
+    gui_layout_state_switch_next_window_inner_size: Option<egui::Vec2>,
     left_side_bar_is_show: bool,
     root_node_connection_state: ArcMutex<ConnectionState>,
 }
@@ -100,7 +100,7 @@ impl GUInterface {
             system,
             node,
             menu_bar: MenuBar {
-                app_ui_layout_state_switch_button_text: AppUILayoutState::Fold.into(),
+                gui_layout_state_switch_button_text: GUILayoutState::Fold.into(),
             },
             state_bar: StateBar {
                 log: ArcMutex::new(None),
@@ -119,30 +119,27 @@ impl GUInterface {
                     },
                 },
             },
-            ui_layout_state: AppUILayoutState::Fold,
-            ui_layout_state_switch_next_window_inner_size: Some(egui::Vec2::new(1150., 750.)),
+            gui_layout_state: GUILayoutState::Fold,
+            gui_layout_state_switch_next_window_inner_size: Some(egui::Vec2::new(1150., 750.)),
             left_side_bar_is_show: false,
             root_node_connection_state: ArcMutex::new(ConnectionState::Disconnect),
         })
     }
-    fn window_ui_layout_state_switch_to(
-        app_ui_layout_state: AppUILayoutState,
-        ctx: &egui::Context,
-        dst_app_ui_layout_state: &mut AppUILayoutState,
-        ui_layout_state_switch_next_window_inner_size: &mut Option<egui::Vec2>,
-        app_ui_layout_state_switch_button_text: &mut AppUILayoutStateSwitchButtonText,
-        left_side_bar_is_show: &mut bool,
-    ) {
-        if let Some(next_window_inner_size) = ui_layout_state_switch_next_window_inner_size.clone()
+    fn gui_layout_state_switch(&mut self, ctx: &egui::Context, gui_layout_state: GUILayoutState) {
+        if let Some(gui_layout_state_switch_next_window_inner_size) =
+            self.gui_layout_state_switch_next_window_inner_size
         {
-            *dst_app_ui_layout_state = app_ui_layout_state;
-            *app_ui_layout_state_switch_button_text = dst_app_ui_layout_state.clone().into();
-            *ui_layout_state_switch_next_window_inner_size =
+            self.gui_layout_state = gui_layout_state;
+            self.menu_bar.gui_layout_state_switch_button_text =
+                self.gui_layout_state.clone().into();
+            self.gui_layout_state_switch_next_window_inner_size =
                 ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(next_window_inner_size));
-            match *dst_app_ui_layout_state {
-                AppUILayoutState::Fold => *left_side_bar_is_show = false,
-                AppUILayoutState::Unfold => *left_side_bar_is_show = true,
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                gui_layout_state_switch_next_window_inner_size,
+            ));
+            match self.gui_layout_state {
+                GUILayoutState::Fold => self.left_side_bar_is_show = false,
+                GUILayoutState::Unfold => self.left_side_bar_is_show = true,
             }
         }
     }
@@ -238,31 +235,21 @@ impl eframe::App for GUInterface {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .button(String::from(
-                            self.menu_bar.app_ui_layout_state_switch_button_text.clone(),
+                            self.menu_bar.gui_layout_state_switch_button_text.clone(),
                         ))
                         .clicked()
                     {
-                        match self.ui_layout_state {
-                            AppUILayoutState::Fold => Self::window_ui_layout_state_switch_to(
-                                AppUILayoutState::Unfold,
-                                ctx,
-                                &mut self.ui_layout_state,
-                                &mut self.ui_layout_state_switch_next_window_inner_size,
-                                &mut self.menu_bar.app_ui_layout_state_switch_button_text,
-                                &mut self.left_side_bar_is_show,
-                            ),
-                            AppUILayoutState::Unfold => Self::window_ui_layout_state_switch_to(
-                                AppUILayoutState::Fold,
-                                ctx,
-                                &mut self.ui_layout_state,
-                                &mut self.ui_layout_state_switch_next_window_inner_size,
-                                &mut self.menu_bar.app_ui_layout_state_switch_button_text,
-                                &mut self.left_side_bar_is_show,
-                            ),
+                        match self.gui_layout_state {
+                            GUILayoutState::Fold => {
+                                self.gui_layout_state_switch(ctx, GUILayoutState::Unfold)
+                            }
+                            GUILayoutState::Unfold => {
+                                self.gui_layout_state_switch(ctx, GUILayoutState::Fold)
+                            }
                         }
                     }
-                    match self.ui_layout_state {
-                        AppUILayoutState::Fold => {
+                    match self.gui_layout_state {
+                        GUILayoutState::Fold => {
                             ui.menu_button("切换视图", |ui| {
                                 ui.radio_value(
                                     &mut self.fold_central_panel.ui_layout_state,
@@ -276,7 +263,7 @@ impl eframe::App for GUInterface {
                                 );
                             });
                         }
-                        AppUILayoutState::Unfold => (),
+                        GUILayoutState::Unfold => (),
                     }
                 });
             });
@@ -313,8 +300,8 @@ impl eframe::App for GUInterface {
         if self.left_side_bar_is_show {
             egui::SidePanel::left("LeftSideBar").show(ctx, |_ui| {});
         }
-        egui::CentralPanel::default().show(ctx, |ui| match self.ui_layout_state {
-            AppUILayoutState::Fold => match self.fold_central_panel.ui_layout_state {
+        egui::CentralPanel::default().show(ctx, |ui| match self.gui_layout_state {
+            GUILayoutState::Fold => match self.fold_central_panel.ui_layout_state {
                 FoldCentralPanelUILayoutState::Readme => {
                     ui.horizontal_top(|ui| {
                         ui.add(
@@ -423,7 +410,7 @@ impl eframe::App for GUInterface {
                     });
                 }
             },
-            AppUILayoutState::Unfold => {
+            GUILayoutState::Unfold => {
                 egui::TopBottomPanel::bottom("CentralPanel-BottomPanel").show_inside(ui, |ui| {
                     ui.add_space(10.);
                     if ui
