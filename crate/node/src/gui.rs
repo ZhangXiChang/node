@@ -1,33 +1,10 @@
-use std::{
-    borrow::Cow,
-    fs::{create_dir_all, File},
-    io::Read,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::borrow::Cow;
 
 use eframe::egui;
 use eyre::Result;
-use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
-use rcgen::CertifiedKey;
-use rustls::{Certificate, PrivateKey, RootCertStore};
-use serde::{Deserialize, Serialize};
 use share_code::ArcMutex;
-use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
-struct RootNodeInfo {
-    name: String,
-    dns_name: String,
-    socket_addr: SocketAddr,
-}
-#[derive(Serialize, Deserialize)]
-struct Config {
-    user_name: String,
-    root_node_info_list: Vec<RootNodeInfo>,
-}
+use crate::{node::Node, system::System};
 
 #[derive(Clone)]
 enum Log {
@@ -105,9 +82,11 @@ struct UnFoldCentralPanel {
     chat_bar: ChatBar,
 }
 
-pub struct GUI {
-    //应用配置
-    config: Config,
+pub struct GUInterface {
+    //应用
+    system: System,
+    //节点
+    node: Node,
     //图形界面
     menu_bar: MenuBar,
     state_bar: StateBar,
@@ -117,14 +96,12 @@ pub struct GUI {
     ui_layout_state_switch_next_window_inner_size: Option<egui::Vec2>,
     left_side_bar_is_show: bool,
     root_node_connection_state: ArcMutex<ConnectionState>,
-    //网络通信
-    endpoint: Endpoint,
-    root_node_connection: ArcMutex<Option<Connection>>,
 }
-impl GUI {
-    pub fn new() -> Result<Self> {
+impl GUInterface {
+    pub fn new(system: System, node: Node) -> Result<Self> {
         Ok(Self {
-            config: Self::load_config()?,
+            system,
+            node,
             menu_bar: MenuBar {
                 app_ui_layout_state_switch_button_text: AppUILayoutState::Fold.into(),
             },
@@ -149,64 +126,7 @@ impl GUI {
             ui_layout_state_switch_next_window_inner_size: Some(egui::Vec2::new(1150., 750.)),
             left_side_bar_is_show: false,
             root_node_connection_state: ArcMutex::new(ConnectionState::Disconnect),
-            endpoint: Endpoint::server(
-                {
-                    let CertifiedKey { cert, key_pair } =
-                        rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
-                    ServerConfig::with_single_cert(
-                        vec![Certificate(cert.der().to_vec())],
-                        PrivateKey(key_pair.serialize_der()),
-                    )?
-                    .transport_config(Arc::new({
-                        let mut a = TransportConfig::default();
-                        a.keep_alive_interval(Some(Duration::from_secs(5)));
-                        a
-                    }))
-                    .to_owned()
-                },
-                "0.0.0.0:0".parse()?,
-            )?,
-            root_node_connection: ArcMutex::new(None),
         })
-    }
-    fn load_config() -> Result<Config> {
-        //初始配置
-        let mut config = Config {
-            user_name: "".to_owned(),
-            root_node_info_list: vec![RootNodeInfo {
-                name: "默认根节点".to_owned(),
-                dns_name: "root_node".to_owned(),
-                socket_addr: "127.0.0.1:10270".parse()?,
-            }],
-        };
-        //解析配置文件
-        let config_file_path = PathBuf::from("./config.json");
-        match File::open(config_file_path.clone()) {
-            Ok(mut config_file) => {
-                let mut config_bytes = Vec::new();
-                config_file.read_to_end(&mut config_bytes)?;
-                config = serde_json::from_slice(&config_bytes)?;
-            }
-            Err(_) => {
-                config.serialize(&mut serde_json::Serializer::with_formatter(
-                    File::create(config_file_path)?,
-                    serde_json::ser::PrettyFormatter::with_indent(b"    "),
-                ))?;
-            }
-        }
-        Ok(config)
-    }
-    fn write_user_name_to_config(user_name: String) -> Result<()> {
-        let config_file_path = PathBuf::from("./config.json");
-        let mut config_bytes = Vec::new();
-        File::open(config_file_path.clone())?.read_to_end(&mut config_bytes)?;
-        let mut config = serde_json::from_slice::<Config>(&config_bytes)?;
-        config.user_name = user_name;
-        config.serialize(&mut serde_json::Serializer::with_formatter(
-            File::create(config_file_path)?,
-            serde_json::ser::PrettyFormatter::with_indent(b"    "),
-        ))?;
-        Ok(())
     }
     fn window_ui_layout_state_switch_to(
         app_ui_layout_state: AppUILayoutState,
@@ -229,48 +149,16 @@ impl GUI {
             }
         }
     }
-    async fn connect_root_node(
-        endpoint: Endpoint,
-        socket_addr: SocketAddr,
-        dns_name: String,
-    ) -> Result<Connection> {
-        Ok(endpoint
-            .connect_with(
-                ClientConfig::with_root_certificates({
-                    let mut a = RootCertStore::empty();
-                    let cert_dir_path = PathBuf::from("./certs/");
-                    create_dir_all(cert_dir_path.clone())?;
-                    for dir_entry in cert_dir_path.read_dir()? {
-                        if let Ok(dir_entry) = dir_entry {
-                            let path = dir_entry.path();
-                            if let Some(extension) = path.extension() {
-                                if extension == "cer" {
-                                    let mut cert_der = Vec::new();
-                                    File::open(path)?.read_to_end(&mut cert_der)?;
-                                    a.add(&Certificate(cert_der))?;
-                                }
-                            }
-                        }
-                    }
-                    a
-                }),
-                socket_addr,
-                &dns_name,
-            )?
-            .await?)
-    }
-    fn connect_root_node_for_tokio(&self) {
+    fn connect_root_node(&self) {
         tokio::spawn({
-            let endpoint = self.endpoint.clone();
-            let root_node_socket_addr = self.config.root_node_info_list
+            let mut node = self.node.clone();
+            let root_node_socket_addr = self.system.root_node_info_list()
                 [self.fold_central_panel.root_node_selected]
-                .socket_addr
-                .clone();
-            let root_node_dns_name = self.config.root_node_info_list
+                .socket_addr;
+            let root_node_dns_name = self.system.root_node_info_list()
                 [self.fold_central_panel.root_node_selected]
                 .dns_name
                 .clone();
-            let root_node_connection = self.root_node_connection.clone();
             let chat_bar_text_input_bar_is_enable = self
                 .unfold_central_panel
                 .chat_bar
@@ -284,13 +172,11 @@ impl GUI {
                 .root_node_connect_ui_is_enable
                 .clone();
             async move {
-                match Self::connect_root_node(endpoint, root_node_socket_addr, root_node_dns_name)
+                match node
+                    .connect_root_node(root_node_socket_addr, root_node_dns_name)
                     .await
                 {
-                    Ok(connection) => {
-                        {
-                            *root_node_connection.lock() = Some(connection.clone());
-                        }
+                    Ok(_) => {
                         {
                             *chat_bar_text_input_bar_is_enable.lock() = true;
                         }
@@ -301,9 +187,9 @@ impl GUI {
                             *state_bar_log.lock() =
                                 Some(Log::Info("连接根节点成功啦~✨，快去玩耍吧~".to_owned()));
                         }
-                        connection.closed().await;
-                        {
-                            *root_node_connection.lock() = None;
+                        match node.wait_root_node_disconnect().await {
+                            Ok(_) => (),
+                            Err(err) => log::error!("{}", err),
                         }
                         {
                             *chat_bar_text_input_bar_is_enable.lock() = false;
@@ -336,21 +222,12 @@ impl GUI {
         });
     }
 }
-impl Default for GUI {
-    fn default() -> Self {
-        match Self::new() {
-            Ok(selfa) => selfa,
-            Err(err) => panic!("{}", err),
-        }
-    }
-}
-impl Drop for GUI {
+impl Drop for GUInterface {
     fn drop(&mut self) {
-        self.endpoint
-            .close(VarInt::from_u32(0), "程序关闭".as_bytes());
+        self.node.close(0, "程序关闭".as_bytes().to_vec());
     }
 }
-impl eframe::App for GUI {
+impl eframe::App for GUInterface {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("MenuBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -487,12 +364,10 @@ impl eframe::App for GUI {
                                     ui.horizontal(|ui| {
                                         ui.label("昵称");
                                         if ui
-                                            .text_edit_singleline(&mut self.config.user_name)
+                                            .text_edit_singleline(self.system.user_name_mut())
                                             .lost_focus()
                                         {
-                                            match Self::write_user_name_to_config(
-                                                self.config.user_name.clone(),
-                                            ) {
+                                            match self.system.write_user_name_to_config() {
                                                 Ok(_) => (),
                                                 Err(err) => {
                                                     *self.state_bar.log.lock() = Some(Log::Error(
@@ -508,12 +383,16 @@ impl eframe::App for GUI {
                                             .show_index(
                                                 ui,
                                                 &mut self.fold_central_panel.root_node_selected,
-                                                self.config.root_node_info_list.len(),
-                                                |i| self.config.root_node_info_list[i].name.clone(),
+                                                self.system.root_node_info_list().len(),
+                                                |i| {
+                                                    self.system.root_node_info_list()[i]
+                                                        .name
+                                                        .clone()
+                                                },
                                             );
                                     });
                                 });
-                                ui.add_enabled_ui(!self.config.user_name.is_empty(), |ui| {
+                                ui.add_enabled_ui(!self.system.user_name().is_empty(), |ui| {
                                     if ui.button("🖧 连接根节点").clicked() {
                                         {
                                             *self
@@ -525,25 +404,22 @@ impl eframe::App for GUI {
                                             *self.root_node_connection_state.lock() =
                                                 ConnectionState::Connecting;
                                         }
-                                        self.connect_root_node_for_tokio();
+                                        self.connect_root_node();
                                     }
                                 });
                             },
                         );
                         ui.add_enabled_ui(
-                            {
-                                let a = self.root_node_connection.lock().is_some();
-                                a
+                            match self.node.root_node_is_disconnect() {
+                                Ok(result) => result.is_none(),
+                                Err(_) => false,
                             },
                             |ui| {
                                 if ui.button("断开连接").clicked() {
-                                    if let Some(root_node_connection) = {
-                                        let a = self.root_node_connection.lock().clone();
-                                        a
-                                    } {
-                                        root_node_connection
-                                            .close(VarInt::from_u32(0), "手动关闭连接".as_bytes());
-                                    }
+                                    self.node.disconnect_root_node(
+                                        0,
+                                        "手动关闭连接".as_bytes().to_vec(),
+                                    );
                                 }
                             },
                         );
@@ -578,7 +454,7 @@ impl eframe::App for GUI {
                             .message_bar
                             .msg_logs
                             .push(Message {
-                                src_user_name: self.config.user_name.clone(),
+                                src_user_name: self.system.user_name().clone(),
                                 text: self
                                     .unfold_central_panel
                                     .chat_bar

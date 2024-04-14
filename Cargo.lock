@@ -2458,6 +2458,7 @@ dependencies = [
  "egui_extras",
  "eyre",
  "image 0.25.1",
+ "log",
  "opener",
  "protocol",
  "quinn",
