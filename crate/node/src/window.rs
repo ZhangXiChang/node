@@ -37,7 +37,7 @@ impl Window {
     fn set_font(ctx: &egui::Context) {
         let mut font_definitions = egui::FontDefinitions::default();
         font_definitions.font_data.insert(
-            "font".to_owned(),
+            "font".to_string(),
             egui::FontData::from_static(include_bytes!(
                 "../../../assets/fonts/SourceHanSansCN-Bold.otf"
             )),
@@ -46,12 +46,12 @@ impl Window {
             .families
             .entry(egui::FontFamily::Proportional)
             .or_default()
-            .insert(0, "font".to_owned());
+            .insert(0, "font".to_string());
         font_definitions
             .families
             .entry(egui::FontFamily::Monospace)
             .or_default()
-            .push("font".to_owned());
+            .push("font".to_string());
         ctx.set_fonts(font_definitions);
     }
 }

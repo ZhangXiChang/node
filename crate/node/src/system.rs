@@ -30,10 +30,10 @@ impl System {
     fn load_config() -> Result<Config> {
         //初始配置
         let mut config = Config {
-            user_name: "".to_owned(),
+            user_name: "".to_string(),
             root_node_info_list: vec![RootNodeInfo {
-                name: "默认根节点".to_owned(),
-                dns_name: "root_node".to_owned(),
+                name: "默认根节点".to_string(),
+                dns_name: "root_node".to_string(),
                 socket_addr: "127.0.0.1:10270".parse()?,
             }],
         };
