@@ -8,6 +8,7 @@ use std::{
 };
 
 use eyre::{eyre, Result};
+use protocol::{DataPacket, NodeInfo, NodeRegisterInfo, Request, Response};
 use quinn::{
     ClientConfig, Connection, ConnectionError, Endpoint, ServerConfig, TransportConfig, VarInt,
 };
@@ -17,27 +18,34 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Node {
+    pub user_name: String,
+    pub description: String,
+    uuid: String,
+    cert_der: Vec<u8>,
     endpoint: Endpoint,
     root_node_connection: ArcMutex<Option<Connection>>,
 }
 impl Node {
-    pub fn new() -> Result<Self> {
+    pub fn new(user_name: String, description: String) -> Result<Self> {
+        let uuid = Uuid::new_v4();
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec![uuid.to_string()])?;
         Ok(Self {
+            user_name,
+            description,
+            uuid: uuid.to_string(),
+            cert_der: cert.der().to_vec(),
             endpoint: Endpoint::server(
-                {
-                    let rcgen::CertifiedKey { cert, key_pair } =
-                        rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
-                    ServerConfig::with_single_cert(
-                        vec![rustls::Certificate(cert.der().to_vec())],
-                        rustls::PrivateKey(key_pair.serialize_der()),
-                    )?
-                    .transport_config(Arc::new({
-                        let mut a = TransportConfig::default();
-                        a.keep_alive_interval(Some(Duration::from_secs(5)));
-                        a
-                    }))
-                    .to_owned()
-                },
+                ServerConfig::with_single_cert(
+                    vec![rustls::Certificate(cert.der().to_vec())],
+                    rustls::PrivateKey(key_pair.serialize_der()),
+                )?
+                .transport_config(Arc::new({
+                    let mut a = TransportConfig::default();
+                    a.keep_alive_interval(Some(Duration::from_secs(5)));
+                    a
+                }))
+                .to_owned(),
                 "0.0.0.0:0".parse()?,
             )?,
             root_node_connection: ArcMutex::new(None),
@@ -102,6 +110,62 @@ impl Node {
             a
         } {
             return Ok(root_node_connection.closed().await);
+        }
+        Err(eyre!("根节点连接不存在"))
+    }
+    pub async fn register_node(&self) -> Result<()> {
+        if let Some(root_node_connection) = {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            let (mut send, _) = root_node_connection.open_bi().await?;
+            send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+                Request::RegisterNode(NodeRegisterInfo {
+                    node_info: NodeInfo {
+                        user_name: self.user_name.clone(),
+                        uuid: self.uuid.clone(),
+                        description: self.description.clone(),
+                    },
+                    cert_der: self.cert_der.clone(),
+                }),
+            ))?)
+            .await?;
+            send.finish().await?;
+        }
+        Ok(())
+    }
+    pub async fn unregister_node(&self) -> Result<()> {
+        if let Some(root_node_connection) = {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            let (mut send, _) = root_node_connection.open_bi().await?;
+            send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+                Request::UnregisterNode,
+            ))?)
+            .await?;
+            send.finish().await?;
+        }
+        Ok(())
+    }
+    pub async fn request_register_node_info_list(&self) -> Result<Vec<NodeInfo>> {
+        if let Some(root_node_connection) = {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            let (mut send, mut recv) = root_node_connection.open_bi().await?;
+            send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+                Request::RegisterNodeInfoList,
+            ))?)
+            .await?;
+            send.finish().await?;
+            match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
+                DataPacket::Response(Response::RegisterNodeInfoList(node_info_list)) => {
+                    return Ok(node_info_list)
+                }
+                _ => (),
+            }
+            return Err(eyre!("服务器返回了意料之外的数据包"));
         }
         Err(eyre!("根节点连接不存在"))
     }

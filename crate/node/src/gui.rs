@@ -5,7 +5,7 @@ use eyre::Result;
 use protocol::NodeInfo;
 use share_code::lock::ArcMutex;
 
-use crate::{node::Node, system::System};
+use crate::system::System;
 
 #[derive(Clone)]
 enum ConnectionState {
@@ -83,12 +83,12 @@ struct TextInputBar {
 }
 
 enum UnfoldCentralPanelLayoutState {
-    UserBrowser,
+    NodeBrowser,
     Chat,
 }
 
-struct UserBrowserBar {
-    node_info_list: Vec<NodeInfo>,
+struct NodeBrowserBar {
+    node_info_list: ArcMutex<Vec<NodeInfo>>,
     row_selected_index: Option<usize>,
 }
 
@@ -99,13 +99,12 @@ struct ChatBar {
 
 struct UnfoldCentralPanel {
     ui_layout_state: UnfoldCentralPanelLayoutState,
-    user_browser_bar: UserBrowserBar,
+    node_browser_bar: NodeBrowserBar,
     chat_bar: ChatBar,
 }
 
 pub struct GUInterface {
     system: System,
-    node: Node,
     gui_layout_state: GUILayoutState,
     gui_layout_state_switch_next_window_inner_size: Option<egui::Vec2>,
     menu_bar: MenuBar,
@@ -115,10 +114,9 @@ pub struct GUInterface {
     root_node_connection_state: ArcMutex<ConnectionState>,
 }
 impl GUInterface {
-    pub fn new(system: System, node: Node) -> Result<Self> {
+    pub fn new(system: System) -> Result<Self> {
         let selfx = Self {
             system,
-            node,
             gui_layout_state: GUILayoutState::Fold,
             gui_layout_state_switch_next_window_inner_size: Some(egui::Vec2::new(1000., 750.)),
             menu_bar: MenuBar {
@@ -135,22 +133,24 @@ impl GUInterface {
                 },
             },
             unfold_central_panel: UnfoldCentralPanel {
-                ui_layout_state: UnfoldCentralPanelLayoutState::UserBrowser,
-                user_browser_bar: UserBrowserBar {
-                    node_info_list: vec![],
+                ui_layout_state: UnfoldCentralPanelLayoutState::NodeBrowser,
+                node_browser_bar: NodeBrowserBar {
+                    node_info_list: ArcMutex::new(Vec::new()),
                     row_selected_index: None,
                 },
                 chat_bar: ChatBar {
-                    message_bar: MessageBar { msg_logs: vec![] },
+                    message_bar: MessageBar {
+                        msg_logs: Vec::new(),
+                    },
                     text_input_bar: TextInputBar {
                         is_enable: ArcMutex::new(false),
-                        input_text: "".to_string(),
+                        input_text: String::new(),
                     },
                 },
             },
             root_node_connection_state: ArcMutex::new(ConnectionState::Disconnect),
         };
-        if !selfx.system.user_name().is_empty() {
+        if !selfx.system.node.user_name.is_empty() {
             selfx.connect_root_node();
         }
         Ok(selfx)
@@ -181,13 +181,13 @@ impl GUInterface {
             *self.root_node_connection_state.lock() = ConnectionState::Connecting;
         }
         tokio::spawn({
-            let mut node = self.node.clone();
-            let root_node_socket_addr = self.system.root_node_info_list()[self
+            let mut node = self.system.node.clone();
+            let root_node_socket_addr = self.system.root_node_info_list[self
                 .fold_central_panel
                 .connect_root_node_bar
                 .root_node_selected]
                 .socket_addr;
-            let root_node_dns_name = self.system.root_node_info_list()[self
+            let root_node_dns_name = self.system.root_node_info_list[self
                 .fold_central_panel
                 .connect_root_node_bar
                 .root_node_selected]
@@ -201,6 +201,11 @@ impl GUInterface {
                 .clone();
             let root_node_connection_state = self.root_node_connection_state.clone();
             let state_bar_log = self.state_bar.log.clone();
+            let node_browser_bar_node_info_list = self
+                .unfold_central_panel
+                .node_browser_bar
+                .node_info_list
+                .clone();
             let root_node_connect_ui_is_enable = self
                 .fold_central_panel
                 .connect_root_node_bar
@@ -222,6 +227,17 @@ impl GUInterface {
                             *state_bar_log.lock() =
                                 Some(Log::Info("连接根节点成功啦~✨，快去玩耍吧~".to_string()));
                         }
+                        match node.register_node().await {
+                            //TODO 临时测试
+                            Ok(_) => (),
+                            Err(err) => log::error!("{}", err),
+                        }
+                        match node.request_register_node_info_list().await {
+                            Ok(node_info_list) => {
+                                *node_browser_bar_node_info_list.lock() = node_info_list
+                            }
+                            Err(err) => log::error!("{}", err),
+                        }
                         if let Err(err) = node.wait_root_node_disconnect().await {
                             log::error!("{}", err);
                         }
@@ -234,6 +250,9 @@ impl GUInterface {
                         {
                             *state_bar_log.lock() =
                                 Some(Log::Info("根节点断开连接惹！不要离开我呀~😭".to_string()));
+                        }
+                        {
+                            *node_browser_bar_node_info_list.lock() = Vec::new();
                         }
                         {
                             *root_node_connect_ui_is_enable.lock() = true;
@@ -258,7 +277,7 @@ impl GUInterface {
 }
 impl Drop for GUInterface {
     fn drop(&mut self) {
-        self.node.close(0, "程序关闭".as_bytes().to_vec());
+        self.system.node.close(0, "程序关闭".as_bytes().to_vec());
     }
 }
 impl eframe::App for GUInterface {
@@ -386,12 +405,10 @@ impl eframe::App for GUInterface {
                                     ui.horizontal(|ui| {
                                         ui.label("昵称");
                                         if ui
-                                            .text_edit_singleline(self.system.user_name_mut())
+                                            .text_edit_singleline(&mut self.system.node.user_name)
                                             .lost_focus()
                                         {
-                                            if let Err(err) =
-                                                self.system.write_user_name_to_config()
-                                            {
+                                            if let Err(err) = self.system.save_config() {
                                                 *self.state_bar.log.lock() = Some(Log::Error(
                                                     format!("配置保存错误！原因：{}", err),
                                                 ))
@@ -407,16 +424,12 @@ impl eframe::App for GUInterface {
                                                     .fold_central_panel
                                                     .connect_root_node_bar
                                                     .root_node_selected,
-                                                self.system.root_node_info_list().len(),
-                                                |i| {
-                                                    self.system.root_node_info_list()[i]
-                                                        .name
-                                                        .clone()
-                                                },
+                                                self.system.root_node_info_list.len(),
+                                                |i| self.system.root_node_info_list[i].name.clone(),
                                             );
                                     });
                                 });
-                                ui.add_enabled_ui(!self.system.user_name().is_empty(), |ui| {
+                                ui.add_enabled_ui(!self.system.node.user_name.is_empty(), |ui| {
                                     if ui.button("🖧 连接根节点").clicked() {
                                         self.connect_root_node();
                                     }
@@ -424,13 +437,13 @@ impl eframe::App for GUInterface {
                             },
                         );
                         ui.add_enabled_ui(
-                            match self.node.root_node_is_disconnect() {
+                            match self.system.node.root_node_is_disconnect() {
                                 Ok(result) => result.is_none(),
                                 Err(_) => false,
                             },
                             |ui| {
                                 if ui.button("断开连接").clicked() {
-                                    self.node.disconnect_root_node(
+                                    self.system.node.disconnect_root_node(
                                         0,
                                         "手动关闭连接".as_bytes().to_vec(),
                                     );
@@ -441,7 +454,7 @@ impl eframe::App for GUInterface {
                 }
             },
             GUILayoutState::Unfold => match self.unfold_central_panel.ui_layout_state {
-                UnfoldCentralPanelLayoutState::UserBrowser => {
+                UnfoldCentralPanelLayoutState::NodeBrowser => {
                     egui_extras::TableBuilder::new(ui)
                         .striped(true)
                         .resizable(true)
@@ -451,7 +464,7 @@ impl eframe::App for GUInterface {
                         .column(egui_extras::Column::remainder())
                         .header(18., |mut header| {
                             header.col(|ui| {
-                                ui.heading("节点名称");
+                                ui.heading("用户名");
                             });
                             header.col(|ui| {
                                 ui.heading("UUID");
@@ -463,24 +476,34 @@ impl eframe::App for GUInterface {
                         .body(|body| {
                             body.rows(
                                 18.,
-                                self.unfold_central_panel
-                                    .user_browser_bar
-                                    .node_info_list
-                                    .len(),
+                                {
+                                    let a = self
+                                        .unfold_central_panel
+                                        .node_browser_bar
+                                        .node_info_list
+                                        .lock()
+                                        .len();
+                                    a
+                                },
                                 |mut row| {
                                     if let Some(row_selected_index) = self
                                         .unfold_central_panel
-                                        .user_browser_bar
+                                        .node_browser_bar
                                         .row_selected_index
                                     {
                                         row.set_selected(row.index() == row_selected_index);
                                     }
-                                    let node_info =
-                                        self.unfold_central_panel.user_browser_bar.node_info_list
-                                            [row.index()]
+                                    let node_info = {
+                                        let a = self
+                                            .unfold_central_panel
+                                            .node_browser_bar
+                                            .node_info_list
+                                            .lock()[row.index()]
                                         .clone();
+                                        a
+                                    };
                                     row.col(|ui| {
-                                        ui.label(node_info.name);
+                                        ui.label(node_info.user_name);
                                     });
                                     row.col(|ui| {
                                         ui.label(node_info.uuid);
@@ -490,7 +513,7 @@ impl eframe::App for GUInterface {
                                     });
                                     if row.response().clicked() {
                                         self.unfold_central_panel
-                                            .user_browser_bar
+                                            .node_browser_bar
                                             .row_selected_index = Some(row.index());
                                     }
                                 },
@@ -540,7 +563,7 @@ impl eframe::App for GUInterface {
                                     .message_bar
                                     .msg_logs
                                     .push(Message {
-                                        src_user_name: self.system.user_name().clone(),
+                                        src_user_name: self.system.node.user_name.clone(),
                                         text: self
                                             .unfold_central_panel
                                             .chat_bar
@@ -569,7 +592,7 @@ impl eframe::App for GUInterface {
                                         .message_bar
                                         .msg_logs
                                         .clone();
-                                    a
+                                    a //TODO 尝试去掉a参数，检查是否是因为克隆或者调用内部函数的原因
                                 }
                                 .iter()
                                 {
@@ -587,7 +610,7 @@ impl eframe::App for GUInterface {
         });
         if let Some(_row_selected_index) = self
             .unfold_central_panel
-            .user_browser_bar
+            .node_browser_bar
             .row_selected_index
         {
             egui::SidePanel::right("RightSideBar-Cover")
@@ -595,12 +618,12 @@ impl eframe::App for GUInterface {
                 .show(ctx, |ui| {
                     if ui.button("关闭").clicked() {
                         self.unfold_central_panel
-                            .user_browser_bar
+                            .node_browser_bar
                             .row_selected_index = None;
                     }
                     if ui.button("连接").clicked() {
                         self.unfold_central_panel
-                            .user_browser_bar
+                            .node_browser_bar
                             .row_selected_index = None;
                         self.unfold_central_panel.ui_layout_state =
                             UnfoldCentralPanelLayoutState::Chat;
