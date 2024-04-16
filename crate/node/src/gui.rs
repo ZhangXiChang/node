@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use eframe::egui;
 use eyre::Result;
-use share_code::ArcMutex;
-use uuid::Uuid;
+use protocol::NodeInfo;
+use share_code::lock::ArcMutex;
 
 use crate::{node::Node, system::System};
 
@@ -87,13 +87,6 @@ enum UnfoldCentralPanelLayoutState {
     Chat,
 }
 
-#[derive(Clone)]
-struct NodeInfo {
-    name: String,
-    uuid: String,
-    description: String,
-}
-
 struct UserBrowserBar {
     node_info_list: Vec<NodeInfo>,
     row_selected_index: Option<usize>,
@@ -144,11 +137,7 @@ impl GUInterface {
             unfold_central_panel: UnfoldCentralPanel {
                 ui_layout_state: UnfoldCentralPanelLayoutState::UserBrowser,
                 user_browser_bar: UserBrowserBar {
-                    node_info_list: vec![NodeInfo {
-                        name: "qwdqwdqwdqwd".to_string(),
-                        uuid: Uuid::new_v4().to_string(),
-                        description: "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq".to_string(),
-                    }],
+                    node_info_list: vec![],
                     row_selected_index: None,
                 },
                 chat_bar: ChatBar {

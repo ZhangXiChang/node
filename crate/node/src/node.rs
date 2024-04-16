@@ -12,7 +12,7 @@ use quinn::{
     ClientConfig, Connection, ConnectionError, Endpoint, ServerConfig, TransportConfig, VarInt,
 };
 use rustls::RootCertStore;
-use share_code::ArcMutex;
+use share_code::lock::ArcMutex;
 use uuid::Uuid;
 
 #[derive(Clone)]
