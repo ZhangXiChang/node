@@ -13,7 +13,7 @@ use quinn::{
     ClientConfig, Connection, ConnectionError, Endpoint, ServerConfig, TransportConfig, VarInt,
 };
 use rustls::RootCertStore;
-use share_code::lock::ArcMutex;
+use share_code::{lock::ArcMutex, x509::x509_dns_name_from_der};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -24,6 +24,7 @@ pub struct Node {
     cert_der: Vec<u8>,
     endpoint: Endpoint,
     root_node_connection: ArcMutex<Option<Connection>>,
+    node_connection: ArcMutex<Option<Connection>>,
 }
 impl Node {
     pub fn new(user_name: String, readme: String) -> Result<Self> {
@@ -50,16 +51,13 @@ impl Node {
                 "0.0.0.0:0".parse()?,
             )?,
             root_node_connection: ArcMutex::new(None),
+            node_connection: ArcMutex::new(None),
         })
     }
     pub fn close(&self, error_code: u32, reason: Vec<u8>) {
         self.endpoint.close(VarInt::from_u32(error_code), &reason);
     }
-    pub async fn connect_root_node(
-        &mut self,
-        socket_addr: SocketAddr,
-        dns_name: String,
-    ) -> Result<()> {
+    pub async fn connect_root_node(&self, socket_addr: SocketAddr, dns_name: String) -> Result<()> {
         *self.root_node_connection.lock() = Some(
             self.endpoint
                 .connect_with(
@@ -101,18 +99,20 @@ impl Node {
             let a = self.root_node_connection.lock().clone();
             a
         } {
-            return Ok(root_node_connection.close_reason());
+            Ok(root_node_connection.close_reason())
+        } else {
+            Err(eyre!("根节点连接不存在"))
         }
-        Err(eyre!("根节点连接不存在"))
     }
     pub async fn wait_root_node_disconnect(&self) -> Result<ConnectionError> {
         if let Some(root_node_connection) = {
             let a = self.root_node_connection.lock().clone();
             a
         } {
-            return Ok(root_node_connection.closed().await);
+            Ok(root_node_connection.closed().await)
+        } else {
+            Err(eyre!("根节点连接不存在"))
         }
-        Err(eyre!("根节点连接不存在"))
     }
     pub async fn register_node(&self) -> Result<()> {
         if let Some(root_node_connection) = {
@@ -162,12 +162,58 @@ impl Node {
             send.finish().await?;
             match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
                 DataPacket::Response(Response::RegisterNodeInfoList(node_info_list)) => {
-                    return Ok(node_info_list)
+                    Ok(node_info_list)
                 }
-                _ => (),
+                _ => Err(eyre!("服务器返回了意料之外的数据包")),
             }
-            return Err(eyre!("服务器返回了意料之外的数据包"));
+        } else {
+            Err(eyre!("根节点连接不存在"))
         }
-        Err(eyre!("根节点连接不存在"))
+    }
+    pub async fn accept(&self) -> Result<()> {
+        if let Some(connecting) = self.endpoint.accept().await {
+            *self.node_connection.lock() = Some(connecting.await?);
+        }
+        Ok(())
+    }
+    pub async fn connect_node(&self, uuid: String) -> Result<()> {
+        if let Some(root_node_connection) = {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            let (mut send, mut recv) = root_node_connection.open_bi().await?;
+            send.write_all(&rmp_serde::to_vec(&DataPacket::Request(
+                Request::ConnectNode(uuid),
+            ))?)
+            .await?;
+            send.finish().await?;
+            match rmp_serde::from_slice::<DataPacket>(&recv.read_to_end(usize::MAX).await?)? {
+                DataPacket::Response(Response::ConnectNode(connect_node_info)) => {
+                    if let Some(connect_node_info) = connect_node_info {
+                        *self.node_connection.lock() = Some(
+                            self.endpoint
+                                .connect_with(
+                                    ClientConfig::with_root_certificates({
+                                        let mut a = RootCertStore::empty();
+                                        a.add(&rustls::Certificate(
+                                            connect_node_info.cert_der.clone(),
+                                        ))?;
+                                        a
+                                    }),
+                                    connect_node_info.socket_addr,
+                                    &x509_dns_name_from_der(connect_node_info.cert_der)?,
+                                )?
+                                .await?,
+                        );
+                        Ok(())
+                    } else {
+                        Err(eyre!("没有找到节点"))
+                    }
+                }
+                _ => Err(eyre!("服务器返回了意料之外的数据包")),
+            }
+        } else {
+            Err(eyre!("根节点连接不存在"))
+        }
     }
 }

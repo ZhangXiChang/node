@@ -2,7 +2,7 @@ use std::{fs::File, io::Read, sync::Arc, time::Duration};
 
 use clap::Parser;
 use eyre::Result;
-use protocol::{DataPacket, NodeRegisterInfo, Request, Response};
+use protocol::{ConnectNodeInfo, DataPacket, NodeRegisterInfo, Request, Response};
 use quinn::{Connection, Endpoint, ServerConfig, TransportConfig};
 use share_code::lock::ArcMutex;
 
@@ -16,6 +16,7 @@ struct CLIArgs {
     key_path: String,
 }
 
+#[derive(Clone)]
 struct Node {
     register_info: NodeRegisterInfo,
     connection: Connection,
@@ -61,12 +62,18 @@ async fn main() -> Result<()> {
                         &recv.read_to_end(usize::MAX).await?,
                     )? {
                         DataPacket::Request(Request::RegisterNode(register_info)) => {
+                            log::info!(
+                                "[{}]注册节点，注册信息：{:?}",
+                                connection.remote_address(),
+                                register_info.node_info
+                            );
                             register_node_list.lock().push(Node {
                                 register_info,
                                 connection: connection.clone(),
                             });
                         }
                         DataPacket::Request(Request::UnregisterNode) => {
+                            log::info!("[{}]注销节点", connection.remote_address());
                             let mut register_node_list = register_node_list.lock();
                             for i in 0..register_node_list.len() {
                                 if register_node_list[i].connection.stable_id()
@@ -77,6 +84,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         DataPacket::Request(Request::RegisterNodeInfoList) => {
+                            log::info!("[{}]请求注册节点信息列表", connection.remote_address());
                             send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
                                 Response::RegisterNodeInfoList({
                                     let a = register_node_list
@@ -86,6 +94,33 @@ async fn main() -> Result<()> {
                                         .collect();
                                     a
                                 }),
+                            ))?)
+                            .await?;
+                            send.finish().await?;
+                        }
+                        DataPacket::Request(Request::ConnectNode(uuid)) => {
+                            log::info!(
+                                "[{}]请求连接节点，目标UUID：{}",
+                                connection.remote_address(),
+                                uuid
+                            );
+                            let mut connect_node_info = None;
+                            for node in {
+                                let a = register_node_list.lock().clone();
+                                a
+                            }
+                            .iter()
+                            {
+                                if node.register_info.node_info.uuid == uuid {
+                                    connect_node_info = Some(ConnectNodeInfo {
+                                        socket_addr: node.connection.remote_address(),
+                                        cert_der: node.register_info.cert_der.clone(),
+                                    });
+                                    break;
+                                }
+                            }
+                            send.write_all(&rmp_serde::to_vec(&DataPacket::Response(
+                                Response::ConnectNode(connect_node_info),
                             ))?)
                             .await?;
                             send.finish().await?;

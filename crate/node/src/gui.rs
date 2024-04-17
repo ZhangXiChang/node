@@ -82,14 +82,17 @@ struct TextInputBar {
     input_text: String,
 }
 
+#[derive(Clone)]
 enum UnfoldCentralPanelLayoutState {
     NodeBrowser,
     Chat,
 }
 
+#[derive(Clone)]
 struct NodeBrowserBar {
     node_info_list: ArcMutex<Vec<NodeInfo>>,
-    row_selected_index: Option<usize>,
+    row_selected_index: ArcMutex<Option<usize>>,
+    register_node_button_is_enable: bool,
 }
 
 struct ChatBar {
@@ -98,7 +101,7 @@ struct ChatBar {
 }
 
 struct UnfoldCentralPanel {
-    gui_layout_state: UnfoldCentralPanelLayoutState,
+    gui_layout_state: ArcMutex<UnfoldCentralPanelLayoutState>,
     node_browser_bar: NodeBrowserBar,
     chat_bar: ChatBar,
 }
@@ -133,10 +136,11 @@ impl GUInterface {
                 },
             },
             unfold_central_panel: UnfoldCentralPanel {
-                gui_layout_state: UnfoldCentralPanelLayoutState::NodeBrowser,
+                gui_layout_state: ArcMutex::new(UnfoldCentralPanelLayoutState::NodeBrowser),
                 node_browser_bar: NodeBrowserBar {
                     node_info_list: ArcMutex::new(Vec::new()),
-                    row_selected_index: None,
+                    row_selected_index: ArcMutex::new(None),
+                    register_node_button_is_enable: true,
                 },
                 chat_bar: ChatBar {
                     message_bar: MessageBar {
@@ -175,7 +179,10 @@ impl GUInterface {
                         .node_info_list
                         .lock() = Vec::new();
                 }
-                GUILayoutState::Unfold => match self.unfold_central_panel.gui_layout_state {
+                GUILayoutState::Unfold => match {
+                    let a = self.unfold_central_panel.gui_layout_state.lock().clone();
+                    a
+                } {
                     UnfoldCentralPanelLayoutState::NodeBrowser => {
                         tokio::spawn({
                             let node = self.system.node.clone();
@@ -211,7 +218,7 @@ impl GUInterface {
             *self.root_node_connection_state.lock() = ConnectionState::Connecting;
         }
         tokio::spawn({
-            let mut node = self.system.node.clone();
+            let node = self.system.node.clone();
             let root_node_socket_addr = self.system.root_node_info_list[self
                 .fold_central_panel
                 .connect_root_node_bar
@@ -257,29 +264,33 @@ impl GUInterface {
                             *state_bar_log.lock() =
                                 Some(Log::Info("连接根节点成功啦~✨，快去玩耍吧~".to_string()));
                         }
-                        match node.register_node().await {
-                            Ok(_) => (),
-                            Err(err) => log::error!("{}", err),
-                        }
-                        if let Err(err) = node.wait_root_node_disconnect().await {
-                            log::error!("{}", err);
-                        }
-                        {
-                            *chat_bar_text_input_bar_is_enable.lock() = false;
-                        }
-                        {
-                            *root_node_connection_state.lock() = ConnectionState::Disconnect;
-                        }
-                        {
-                            *state_bar_log.lock() =
-                                Some(Log::Info("根节点断开连接惹！不要离开我呀~😭".to_string()));
-                        }
-                        {
-                            *node_browser_bar_node_info_list.lock() = Vec::new();
-                        }
-                        {
-                            *root_node_connect_ui_is_enable.lock() = true;
-                        }
+                        //等待根节点断开
+                        tokio::spawn({
+                            let node = node.clone();
+                            async move {
+                                if let Err(err) = node.wait_root_node_disconnect().await {
+                                    log::error!("{}", err);
+                                }
+                                {
+                                    *chat_bar_text_input_bar_is_enable.lock() = false;
+                                }
+                                {
+                                    *root_node_connection_state.lock() =
+                                        ConnectionState::Disconnect;
+                                }
+                                {
+                                    *state_bar_log.lock() = Some(Log::Info(
+                                        "根节点断开连接惹！不要离开我呀~😭".to_string(),
+                                    ));
+                                }
+                                {
+                                    *node_browser_bar_node_info_list.lock() = Vec::new();
+                                }
+                                {
+                                    *root_node_connect_ui_is_enable.lock() = true;
+                                }
+                            }
+                        });
                     }
                     Err(_) => {
                         {
@@ -492,8 +503,43 @@ impl eframe::App for GUInterface {
                     });
                 }
             },
-            GUILayoutState::Unfold => match self.unfold_central_panel.gui_layout_state {
+            GUILayoutState::Unfold => match {
+                let a = self.unfold_central_panel.gui_layout_state.lock().clone();
+                a
+            } {
                 UnfoldCentralPanelLayoutState::NodeBrowser => {
+                    ui.add_enabled_ui(
+                        match self.system.node.root_node_is_disconnect() {
+                            Ok(result) => result.is_none(),
+                            Err(_) => false,
+                        } && self
+                            .unfold_central_panel
+                            .node_browser_bar
+                            .register_node_button_is_enable,
+                        |ui| {
+                            if ui.button("注册节点").clicked() {
+                                self.unfold_central_panel
+                                    .node_browser_bar
+                                    .register_node_button_is_enable = false;
+                                tokio::spawn({
+                                    let node = self.system.node.clone();
+                                    {
+                                        let node = node.clone();
+                                        async move {
+                                            match node.register_node().await {
+                                                Ok(_) => (),
+                                                Err(err) => log::error!("{}", err),
+                                            }
+                                            match node.accept().await {
+                                                Ok(_) => (),
+                                                Err(err) => log::error!("{}", err),
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        },
+                    );
                     egui_extras::TableBuilder::new(ui)
                         .striped(true)
                         .resizable(true)
@@ -533,11 +579,15 @@ impl eframe::App for GUInterface {
                                 },
                                 |mut row| {
                                     //点击选中突出显示
-                                    if let Some(row_selected_index) = self
-                                        .unfold_central_panel
-                                        .node_browser_bar
-                                        .row_selected_index
-                                    {
+                                    if let Some(row_selected_index) = {
+                                        let a = self
+                                            .unfold_central_panel
+                                            .node_browser_bar
+                                            .row_selected_index
+                                            .lock()
+                                            .clone();
+                                        a
+                                    } {
                                         row.set_selected(row.index() == row_selected_index);
                                     }
                                     //绘制字段
@@ -572,9 +622,11 @@ impl eframe::App for GUInterface {
                                     });
                                     //点击选中
                                     if row.response().clicked() {
-                                        self.unfold_central_panel
+                                        *self
+                                            .unfold_central_panel
                                             .node_browser_bar
-                                            .row_selected_index = Some(row.index());
+                                            .row_selected_index
+                                            .lock() = Some(row.index());
                                     }
                                 },
                             );
@@ -679,32 +731,72 @@ impl eframe::App for GUInterface {
                 }
             },
         });
-        if let Some(_row_selected_index) = self
-            .unfold_central_panel
-            .node_browser_bar
-            .row_selected_index
-        {
+        if let Some(row_selected_index) = {
+            let a = self
+                .unfold_central_panel
+                .node_browser_bar
+                .row_selected_index
+                .lock()
+                .clone();
+            a
+        } {
             egui::SidePanel::right("RightSideBar-Cover")
                 .min_width(300.)
                 .show(ctx, |ui| {
                     if ui.button("关闭").clicked() {
-                        self.unfold_central_panel
+                        *self
+                            .unfold_central_panel
                             .node_browser_bar
-                            .row_selected_index = None;
+                            .row_selected_index
+                            .lock() = None;
                     }
                     if ui.button("连接").clicked() {
-                        self.unfold_central_panel
-                            .node_browser_bar
-                            .row_selected_index = None;
-                        self.unfold_central_panel.gui_layout_state =
-                            UnfoldCentralPanelLayoutState::Chat;
-                        {
-                            *self
+                        tokio::spawn({
+                            let node = self.system.node.clone();
+                            let state_bar_log = self.state_bar.log.clone();
+                            let arc_mutex_row_selected_index = self
+                                .unfold_central_panel
+                                .node_browser_bar
+                                .row_selected_index
+                                .clone();
+                            let unfold_central_panel_gui_layout_state =
+                                self.unfold_central_panel.gui_layout_state.clone();
+                            let node_browser_bar_node_info_list = self
                                 .unfold_central_panel
                                 .node_browser_bar
                                 .node_info_list
-                                .lock() = Vec::new();
-                        }
+                                .clone();
+                            async move {
+                                //连接节点
+                                match node
+                                    .connect_node({
+                                        let a = node_browser_bar_node_info_list.lock()
+                                            [row_selected_index]
+                                            .uuid
+                                            .clone();
+                                        a
+                                    })
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        {
+                                            *arc_mutex_row_selected_index.lock() = None
+                                        }
+                                        {
+                                            *unfold_central_panel_gui_layout_state.lock() =
+                                                UnfoldCentralPanelLayoutState::Chat;
+                                        }
+                                        {
+                                            *node_browser_bar_node_info_list.lock() = Vec::new();
+                                        }
+                                    }
+                                    Err(_) => {
+                                        *state_bar_log.lock() =
+                                            Some(Log::Error("连接根节点失败惹！可恶💢".to_string()))
+                                    }
+                                };
+                            }
+                        });
                     }
                 });
         }
