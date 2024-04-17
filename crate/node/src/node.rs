@@ -19,33 +19,34 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Node {
     pub user_name: String,
-    pub description: String,
+    pub readme: String,
     uuid: String,
     cert_der: Vec<u8>,
     endpoint: Endpoint,
     root_node_connection: ArcMutex<Option<Connection>>,
 }
 impl Node {
-    pub fn new(user_name: String, description: String) -> Result<Self> {
-        let uuid = Uuid::new_v4();
+    pub fn new(user_name: String, readme: String) -> Result<Self> {
         let rcgen::CertifiedKey { cert, key_pair } =
-            rcgen::generate_simple_self_signed(vec![uuid.to_string()])?;
+            rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
         Ok(Self {
             user_name,
-            description,
-            uuid: uuid.to_string(),
+            readme,
+            uuid: Uuid::new_v4().to_string(),
             cert_der: cert.der().to_vec(),
             endpoint: Endpoint::server(
-                ServerConfig::with_single_cert(
-                    vec![rustls::Certificate(cert.der().to_vec())],
-                    rustls::PrivateKey(key_pair.serialize_der()),
-                )?
-                .transport_config(Arc::new({
-                    let mut a = TransportConfig::default();
-                    a.keep_alive_interval(Some(Duration::from_secs(5)));
-                    a
-                }))
-                .to_owned(),
+                {
+                    ServerConfig::with_single_cert(
+                        vec![rustls::Certificate(cert.der().to_vec())],
+                        rustls::PrivateKey(key_pair.serialize_der()),
+                    )?
+                    .transport_config(Arc::new({
+                        let mut a = TransportConfig::default();
+                        a.keep_alive_interval(Some(Duration::from_secs(5)));
+                        a
+                    }))
+                    .to_owned()
+                },
                 "0.0.0.0:0".parse()?,
             )?,
             root_node_connection: ArcMutex::new(None),
@@ -124,7 +125,7 @@ impl Node {
                     node_info: NodeInfo {
                         user_name: self.user_name.clone(),
                         uuid: self.uuid.clone(),
-                        description: self.description.clone(),
+                        readme: self.readme.clone(),
                     },
                     cert_der: self.cert_der.clone(),
                 }),

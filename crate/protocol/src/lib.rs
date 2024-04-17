@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct NodeInfo {
     pub user_name: String,
     pub uuid: String,
-    pub description: String,
+    pub readme: String,
 }
 
 #[derive(Serialize, Deserialize)]

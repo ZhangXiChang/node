@@ -14,7 +14,7 @@ pub struct RootNodeInfo {
 #[derive(Serialize, Deserialize)]
 struct Config {
     user_name: String,
-    description: String,
+    readme: String,
     root_node_info_list: Vec<RootNodeInfo>,
 }
 
@@ -26,7 +26,7 @@ impl System {
     pub fn new() -> Result<Self> {
         let config = Self::load_config()?;
         Ok(Self {
-            node: Node::new(config.user_name, config.description)?,
+            node: Node::new(config.user_name, config.readme)?,
             root_node_info_list: config.root_node_info_list,
         })
     }
@@ -34,7 +34,7 @@ impl System {
         //初始配置
         let mut config = Config {
             user_name: String::new(),
-            description: String::new(),
+            readme: String::new(),
             root_node_info_list: vec![RootNodeInfo {
                 name: "默认根节点".to_string(),
                 dns_name: "root_node".to_string(),
@@ -64,7 +64,7 @@ impl System {
         File::open(config_file_path.clone())?.read_to_end(&mut config_bytes)?;
         let mut config = serde_json::from_slice::<Config>(&config_bytes)?;
         config.user_name = self.node.user_name.clone();
-        config.description = self.node.description.clone();
+        config.readme = self.node.readme.clone();
         config.serialize(&mut serde_json::Serializer::with_formatter(
             File::create(config_file_path)?,
             serde_json::ser::PrettyFormatter::with_indent(b"    "),
