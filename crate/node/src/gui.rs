@@ -4,8 +4,9 @@ use eframe::egui;
 use eyre::Result;
 use protocol::NodeInfo;
 use share_code::lock::ArcMutex;
+use tokio::task::JoinHandle;
 
-use crate::system::System;
+use crate::{node::Node, system::System};
 
 #[derive(Clone)]
 enum ConnectionState {
@@ -74,12 +75,11 @@ struct FoldCentralPanel {
 }
 
 struct MessageBar {
-    msg_logs: Vec<Message>,
+    msg_logs: ArcMutex<Vec<Message>>,
 }
 
 struct TextInputBar {
-    is_enable: ArcMutex<bool>,
-    input_text: String,
+    input_text: ArcMutex<String>,
 }
 
 #[derive(Clone)]
@@ -92,7 +92,6 @@ enum UnfoldCentralPanelLayoutState {
 struct NodeBrowserBar {
     node_info_list: ArcMutex<Vec<NodeInfo>>,
     row_selected_index: ArcMutex<Option<usize>>,
-    register_node_button_is_enable: bool,
 }
 
 struct ChatBar {
@@ -104,6 +103,7 @@ struct UnfoldCentralPanel {
     gui_layout_state: ArcMutex<UnfoldCentralPanelLayoutState>,
     node_browser_bar: NodeBrowserBar,
     chat_bar: ChatBar,
+    wait_node_connect_task: Option<JoinHandle<()>>,
 }
 
 pub struct GUInterface {
@@ -140,17 +140,16 @@ impl GUInterface {
                 node_browser_bar: NodeBrowserBar {
                     node_info_list: ArcMutex::new(Vec::new()),
                     row_selected_index: ArcMutex::new(None),
-                    register_node_button_is_enable: true,
                 },
                 chat_bar: ChatBar {
                     message_bar: MessageBar {
-                        msg_logs: Vec::new(),
+                        msg_logs: ArcMutex::new(Vec::new()),
                     },
                     text_input_bar: TextInputBar {
-                        is_enable: ArcMutex::new(false),
-                        input_text: String::new(),
+                        input_text: ArcMutex::new(String::new()),
                     },
                 },
+                wait_node_connect_task: None,
             },
             root_node_connection_state: ArcMutex::new(ConnectionState::Disconnect),
         };
@@ -230,12 +229,6 @@ impl GUInterface {
                 .root_node_selected]
                 .dns_name
                 .clone();
-            let chat_bar_text_input_bar_is_enable = self
-                .unfold_central_panel
-                .chat_bar
-                .text_input_bar
-                .is_enable
-                .clone();
             let root_node_connection_state = self.root_node_connection_state.clone();
             let state_bar_log = self.state_bar.log.clone();
             let node_browser_bar_node_info_list = self
@@ -255,9 +248,6 @@ impl GUInterface {
                 {
                     Ok(_) => {
                         {
-                            *chat_bar_text_input_bar_is_enable.lock() = true;
-                        }
-                        {
                             *root_node_connection_state.lock() = ConnectionState::Connected;
                         }
                         {
@@ -272,22 +262,19 @@ impl GUInterface {
                                     log::error!("{}", err);
                                 }
                                 {
-                                    *chat_bar_text_input_bar_is_enable.lock() = false;
-                                }
-                                {
                                     *root_node_connection_state.lock() =
                                         ConnectionState::Disconnect;
-                                }
-                                {
-                                    *state_bar_log.lock() = Some(Log::Info(
-                                        "根节点断开连接惹！不要离开我呀~😭".to_string(),
-                                    ));
                                 }
                                 {
                                     *node_browser_bar_node_info_list.lock() = Vec::new();
                                 }
                                 {
                                     *root_node_connect_ui_is_enable.lock() = true;
+                                }
+                                {
+                                    *state_bar_log.lock() = Some(Log::Info(
+                                        "根节点断开连接惹！不要离开我呀~😭".to_string(),
+                                    ));
                                 }
                             }
                         });
@@ -297,16 +284,42 @@ impl GUInterface {
                             *root_node_connection_state.lock() = ConnectionState::Disconnect;
                         }
                         {
-                            *state_bar_log.lock() =
-                                Some(Log::Error("连接根节点失败惹！可恶💢".to_string()));
+                            *root_node_connect_ui_is_enable.lock() = true;
                         }
                         {
-                            *root_node_connect_ui_is_enable.lock() = true;
+                            *state_bar_log.lock() =
+                                Some(Log::Error("连接根节点失败惹！可恶💢".to_string()));
                         }
                     }
                 }
             }
         });
+    }
+    async fn accept_message(node: Node, message_bar_logs: ArcMutex<Vec<Message>>) {
+        loop {
+            match node.accept_uni().await {
+                Ok(mut recv) => match recv.read_to_end(usize::MAX).await {
+                    Ok(data) => match String::from_utf8(data) {
+                        Ok(text) => message_bar_logs.lock().push(Message {
+                            src_user_name: node.user_name.clone(),
+                            text,
+                        }),
+                        Err(err) => {
+                            log::error!("{}", err);
+                            break;
+                        }
+                    },
+                    Err(err) => {
+                        log::error!("{}", err);
+                        break;
+                    }
+                },
+                Err(err) => {
+                    log::error!("{}", err);
+                    break;
+                }
+            }
+        }
     }
 }
 impl Drop for GUInterface {
@@ -369,10 +382,10 @@ impl eframe::App for GUInterface {
                     a
                 } {
                     ConnectionState::Connected => {
-                        ui.colored_label(egui::Color32::LIGHT_GREEN, "🌏 已连接")
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, "🌏 在线")
                     }
                     ConnectionState::Disconnect => {
-                        ui.colored_label(egui::Color32::LIGHT_RED, "❌ 未连接")
+                        ui.colored_label(egui::Color32::LIGHT_RED, "❌ 离线")
                     }
                     ConnectionState::Connecting => {
                         ui.colored_label(egui::Color32::LIGHT_BLUE, "⏳ 连接中...")
@@ -508,132 +521,183 @@ impl eframe::App for GUInterface {
                 a
             } {
                 UnfoldCentralPanelLayoutState::NodeBrowser => {
-                    ui.add_enabled_ui(
-                        match self.system.node.root_node_is_disconnect() {
-                            Ok(result) => result.is_none(),
-                            Err(_) => false,
-                        } && self
-                            .unfold_central_panel
-                            .node_browser_bar
-                            .register_node_button_is_enable,
-                        |ui| {
-                            if ui.button("注册节点").clicked() {
-                                self.unfold_central_panel
-                                    .node_browser_bar
-                                    .register_node_button_is_enable = false;
-                                tokio::spawn({
-                                    let node = self.system.node.clone();
-                                    {
-                                        let node = node.clone();
-                                        async move {
-                                            match node.register_node().await {
-                                                Ok(_) => (),
-                                                Err(err) => log::error!("{}", err),
-                                            }
-                                            match node.accept().await {
-                                                Ok(_) => (),
-                                                Err(err) => log::error!("{}", err),
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                        },
-                    );
-                    egui_extras::TableBuilder::new(ui)
-                        .striped(true)
-                        .resizable(true)
-                        .sense(egui::Sense::click())
-                        .column(egui_extras::Column::exact(125.))
-                        .column(egui_extras::Column::exact(275.))
-                        .column(egui_extras::Column::remainder())
-                        .header(20., |mut header| {
-                            header.col(|ui| {
-                                ui.vertical_centered(|ui| {
-                                    ui.heading("用户名");
-                                });
-                            });
-                            header.col(|ui| {
-                                ui.vertical_centered(|ui| {
-                                    ui.heading("UUID");
-                                });
-                            });
-                            header.col(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(30.);
-                                    ui.heading("自述");
-                                });
-                            });
-                        })
-                        .body(|body| {
-                            body.rows(
-                                20.,
-                                {
-                                    let a = self
-                                        .unfold_central_panel
-                                        .node_browser_bar
-                                        .node_info_list
-                                        .lock()
-                                        .len();
-                                    a
+                    egui::TopBottomPanel::bottom("CentralPanel-Unfold-NodeBrowser-BottomPanel")
+                        .show_inside(ui, |ui| {
+                            ui.add_space(3.);
+                            ui.add_enabled_ui(
+                                match self.system.node.root_node_is_disconnect() {
+                                    Ok(result) => result.is_none(),
+                                    Err(_) => false,
                                 },
-                                |mut row| {
-                                    //点击选中突出显示
-                                    if let Some(row_selected_index) = {
-                                        let a = self
-                                            .unfold_central_panel
-                                            .node_browser_bar
-                                            .row_selected_index
-                                            .lock()
-                                            .clone();
-                                        a
-                                    } {
-                                        row.set_selected(row.index() == row_selected_index);
-                                    }
-                                    //绘制字段
-                                    let node_info = {
-                                        let a = self
-                                            .unfold_central_panel
-                                            .node_browser_bar
-                                            .node_info_list
-                                            .lock()[row.index()]
-                                        .clone();
-                                        a
-                                    };
-                                    row.col(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(10.);
-                                            ui.add(
-                                                egui::Label::new(node_info.user_name).wrap(false),
-                                            );
-                                        });
-                                    });
-                                    row.col(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(10.);
-                                            ui.add(egui::Label::new(node_info.uuid).wrap(false));
-                                        });
-                                    });
-                                    row.col(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(10.);
-                                            ui.add(egui::Label::new(node_info.readme).wrap(false));
-                                        });
-                                    });
-                                    //点击选中
-                                    if row.response().clicked() {
-                                        *self
-                                            .unfold_central_panel
-                                            .node_browser_bar
-                                            .row_selected_index
-                                            .lock() = Some(row.index());
+                                |ui| {
+                                    if ui.button("注册节点").clicked() {
+                                        {
+                                            *self.unfold_central_panel.gui_layout_state.lock() =
+                                                UnfoldCentralPanelLayoutState::Chat;
+                                        }
+                                        {
+                                            *self
+                                                .unfold_central_panel
+                                                .node_browser_bar
+                                                .row_selected_index
+                                                .lock() = None;
+                                        }
+                                        {
+                                            *self
+                                                .unfold_central_panel
+                                                .node_browser_bar
+                                                .node_info_list
+                                                .lock() = Vec::new();
+                                        }
+                                        self.unfold_central_panel.wait_node_connect_task =
+                                            Some(tokio::spawn({
+                                                let node = self.system.node.clone();
+                                                let state_bar_log = self.state_bar.log.clone();
+                                                let message_bar_logs = self
+                                                    .unfold_central_panel
+                                                    .chat_bar
+                                                    .message_bar
+                                                    .msg_logs
+                                                    .clone();
+                                                async move {
+                                                    match node.register_node().await {
+                                                        Ok(_) => (),
+                                                        Err(err) => {
+                                                            log::error!("{}", err);
+                                                            return;
+                                                        }
+                                                    }
+                                                    match node.accept().await {
+                                                        Ok(_) => {
+                                                            *state_bar_log.lock() =
+                                                                Some(Log::Info(
+                                                                    "有人连接了欸！好耶✨"
+                                                                        .to_string(),
+                                                                ));
+                                                            Self::accept_message(
+                                                                node,
+                                                                message_bar_logs,
+                                                            )
+                                                            .await;
+                                                        }
+                                                        Err(err) => {
+                                                            match node.unregister_node().await {
+                                                                Ok(_) => {
+                                                                    log::error!("{}", err);
+                                                                }
+                                                                Err(err) => {
+                                                                    log::error!("{}", err);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }));
                                     }
                                 },
                             );
                         });
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        egui_extras::TableBuilder::new(ui)
+                            .striped(true)
+                            .resizable(true)
+                            .sense(egui::Sense::click())
+                            .column(egui_extras::Column::exact(125.))
+                            .column(egui_extras::Column::exact(275.))
+                            .column(egui_extras::Column::remainder())
+                            .header(20., |mut header| {
+                                header.col(|ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.heading("用户名");
+                                    });
+                                });
+                                header.col(|ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.heading("UUID");
+                                    });
+                                });
+                                header.col(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(30.);
+                                        ui.heading("自述");
+                                    });
+                                });
+                            })
+                            .body(|body| {
+                                body.rows(
+                                    20.,
+                                    {
+                                        let a = self
+                                            .unfold_central_panel
+                                            .node_browser_bar
+                                            .node_info_list
+                                            .lock()
+                                            .len();
+                                        a
+                                    },
+                                    |mut row| {
+                                        //点击选中突出显示
+                                        if let Some(row_selected_index) = {
+                                            let a = self
+                                                .unfold_central_panel
+                                                .node_browser_bar
+                                                .row_selected_index
+                                                .lock()
+                                                .clone();
+                                            a
+                                        } {
+                                            row.set_selected(row.index() == row_selected_index);
+                                        }
+                                        //绘制字段
+                                        let node_info = {
+                                            let a = self
+                                                .unfold_central_panel
+                                                .node_browser_bar
+                                                .node_info_list
+                                                .lock()[row.index()]
+                                            .clone();
+                                            a
+                                        };
+                                        row.col(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(10.);
+                                                ui.add(
+                                                    egui::Label::new(node_info.user_name)
+                                                        .wrap(false),
+                                                );
+                                            });
+                                        });
+                                        row.col(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(10.);
+                                                ui.add(
+                                                    egui::Label::new(node_info.uuid).wrap(false),
+                                                );
+                                            });
+                                        });
+                                        row.col(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(10.);
+                                                ui.add(
+                                                    egui::Label::new(node_info.readme).wrap(false),
+                                                );
+                                            });
+                                        });
+                                        //点击选中
+                                        if row.response().clicked() {
+                                            *self
+                                                .unfold_central_panel
+                                                .node_browser_bar
+                                                .row_selected_index
+                                                .lock() = Some(row.index());
+                                        }
+                                    },
+                                );
+                            });
+                    });
                 }
                 UnfoldCentralPanelLayoutState::Chat => {
-                    egui::TopBottomPanel::bottom("CentralPanel-BottomPanel").show_inside(
+                    egui::TopBottomPanel::bottom("CentralPanel-Fold-Chat-BottomPanel").show_inside(
                         ui,
                         |ui| {
                             ui.horizontal(|ui| {
@@ -641,64 +705,132 @@ impl eframe::App for GUInterface {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui.button("断开连接").clicked() {
-                                            //TODO 断开节点连接
-                                            if false {
-                                                tokio::spawn({
-                                                    let node = self.system.node.clone();
-                                                    async move {
+                                            self.system
+                                                .node
+                                                .disconnect_node(0, "断开连接".as_bytes().to_vec());
+                                            if let Some(wait_node_connect_task) =
+                                                &self.unfold_central_panel.wait_node_connect_task
+                                            {
+                                                wait_node_connect_task.abort();
+                                            }
+                                            {
+                                                *self
+                                                    .unfold_central_panel
+                                                    .gui_layout_state
+                                                    .lock() =
+                                                    UnfoldCentralPanelLayoutState::NodeBrowser;
+                                            }
+                                            tokio::spawn({
+                                                let node = self.system.node.clone();
+                                                let node_browser_bar_node_info_list = self
+                                                    .unfold_central_panel
+                                                    .node_browser_bar
+                                                    .node_info_list
+                                                    .clone();
+                                                let is_register_node =
+                                                    self.system.node.is_register_node.clone();
+                                                async move {
+                                                    if {
+                                                        let a = is_register_node.lock().clone();
+                                                        a
+                                                    } {
                                                         match node.unregister_node().await {
                                                             Ok(_) => (),
                                                             Err(err) => log::error!("{}", err),
                                                         }
                                                     }
-                                                });
-                                            }
+                                                    match node
+                                                        .request_register_node_info_list()
+                                                        .await
+                                                    {
+                                                        Ok(node_info_list) => {
+                                                            *node_browser_bar_node_info_list
+                                                                .lock() = node_info_list
+                                                        }
+                                                        Err(err) => log::error!("{}", err),
+                                                    }
+                                                }
+                                            });
                                         }
                                     },
                                 );
                             });
                             if ui
                                 .add_enabled(
-                                    {
-                                        let a = self
-                                            .unfold_central_panel
-                                            .chat_bar
-                                            .text_input_bar
-                                            .is_enable
-                                            .lock()
-                                            .clone();
-                                        a
+                                    match self.system.node.node_is_disconnect() {
+                                        Ok(result) => result.is_none(),
+                                        Err(_) => false,
                                     },
                                     egui::TextEdit::multiline(
-                                        &mut self
+                                        &mut *self
                                             .unfold_central_panel
                                             .chat_bar
                                             .text_input_bar
-                                            .input_text,
+                                            .input_text
+                                            .lock(),
                                     )
                                     .desired_width(ui.available_width()),
                                 )
                                 .has_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
                             {
-                                self.unfold_central_panel
-                                    .chat_bar
-                                    .message_bar
-                                    .msg_logs
-                                    .push(Message {
-                                        src_user_name: self.system.node.user_name.clone(),
-                                        text: self
-                                            .unfold_central_panel
-                                            .chat_bar
-                                            .text_input_bar
-                                            .input_text
-                                            .trim()
-                                            .to_string(),
-                                    });
+                                {
+                                    self.unfold_central_panel
+                                        .chat_bar
+                                        .message_bar
+                                        .msg_logs
+                                        .lock()
+                                        .push(Message {
+                                            src_user_name: self.system.node.user_name.clone(),
+                                            text: self
+                                                .unfold_central_panel
+                                                .chat_bar
+                                                .text_input_bar
+                                                .input_text
+                                                .lock()
+                                                .trim()
+                                                .to_string(),
+                                        });
+                                }
+                                tokio::spawn({
+                                    let node = self.system.node.clone();
+                                    let input_text = self
+                                        .unfold_central_panel
+                                        .chat_bar
+                                        .text_input_bar
+                                        .input_text
+                                        .clone();
+                                    async move {
+                                        match node.open_uni().await {
+                                            Ok(mut send) => {
+                                                match send
+                                                    .write_all(&{
+                                                        let a = input_text
+                                                            .lock()
+                                                            .trim()
+                                                            .as_bytes()
+                                                            .to_vec();
+                                                        a
+                                                    })
+                                                    .await
+                                                {
+                                                    Ok(_) => (),
+                                                    Err(err) => log::error!("{}", err),
+                                                }
+                                                match send.finish().await {
+                                                    Ok(_) => (),
+                                                    Err(err) => log::error!("{}", err),
+                                                }
+                                            }
+                                            Err(err) => log::error!("{}", err),
+                                        }
+                                    }
+                                });
                                 self.unfold_central_panel
                                     .chat_bar
                                     .text_input_bar
                                     .input_text
+                                    .lock()
                                     .clear();
                             }
                         },
@@ -714,6 +846,7 @@ impl eframe::App for GUInterface {
                                         .chat_bar
                                         .message_bar
                                         .msg_logs
+                                        .lock()
                                         .clone();
                                     a
                                 }
@@ -752,7 +885,7 @@ impl eframe::App for GUInterface {
                     }
                     if ui.button("连接").clicked() {
                         tokio::spawn({
-                            let node = self.system.node.clone();
+                            let mut node = self.system.node.clone();
                             let state_bar_log = self.state_bar.log.clone();
                             let arc_mutex_row_selected_index = self
                                 .unfold_central_panel
@@ -765,6 +898,12 @@ impl eframe::App for GUInterface {
                                 .unfold_central_panel
                                 .node_browser_bar
                                 .node_info_list
+                                .clone();
+                            let message_bar_logs = self
+                                .unfold_central_panel
+                                .chat_bar
+                                .message_bar
+                                .msg_logs
                                 .clone();
                             async move {
                                 //连接节点
@@ -780,19 +919,25 @@ impl eframe::App for GUInterface {
                                 {
                                     Ok(_) => {
                                         {
-                                            *arc_mutex_row_selected_index.lock() = None
-                                        }
-                                        {
                                             *unfold_central_panel_gui_layout_state.lock() =
                                                 UnfoldCentralPanelLayoutState::Chat;
                                         }
                                         {
+                                            *arc_mutex_row_selected_index.lock() = None;
+                                        }
+                                        {
                                             *node_browser_bar_node_info_list.lock() = Vec::new();
                                         }
+                                        {
+                                            *state_bar_log.lock() = Some(Log::Info(
+                                                "连接节点成功了欸！好耶✨".to_string(),
+                                            ));
+                                        }
+                                        Self::accept_message(node, message_bar_logs).await;
                                     }
                                     Err(_) => {
                                         *state_bar_log.lock() =
-                                            Some(Log::Error("连接根节点失败惹！可恶💢".to_string()))
+                                            Some(Log::Error("连接节点失败惹！可恶💢".to_string()));
                                     }
                                 };
                             }

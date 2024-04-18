@@ -16,6 +16,7 @@ pub struct NodeRegisterInfo {
 }
 #[derive(Serialize, Deserialize)]
 pub struct ConnectNodeInfo {
+    pub user_name: String,
     pub socket_addr: SocketAddr,
     pub cert_der: Vec<u8>,
 }

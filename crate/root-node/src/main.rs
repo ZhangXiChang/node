@@ -113,6 +113,7 @@ async fn main() -> Result<()> {
                             {
                                 if node.register_info.node_info.uuid == uuid {
                                     connect_node_info = Some(ConnectNodeInfo {
+                                        user_name: node.register_info.node_info.user_name.clone(),
                                         socket_addr: node.connection.remote_address(),
                                         cert_der: node.register_info.cert_der.clone(),
                                     });

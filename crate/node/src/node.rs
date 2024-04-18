@@ -10,7 +10,8 @@ use std::{
 use eyre::{eyre, Result};
 use protocol::{DataPacket, NodeInfo, NodeRegisterInfo, Request, Response};
 use quinn::{
-    ClientConfig, Connection, ConnectionError, Endpoint, ServerConfig, TransportConfig, VarInt,
+    ClientConfig, Connection, ConnectionError, Endpoint, RecvStream, SendStream, ServerConfig,
+    TransportConfig, VarInt,
 };
 use rustls::RootCertStore;
 use share_code::{lock::ArcMutex, x509::x509_dns_name_from_der};
@@ -24,7 +25,9 @@ pub struct Node {
     cert_der: Vec<u8>,
     endpoint: Endpoint,
     root_node_connection: ArcMutex<Option<Connection>>,
+    pub is_register_node: ArcMutex<bool>,
     node_connection: ArcMutex<Option<Connection>>,
+    node_user_name: String,
 }
 impl Node {
     pub fn new(user_name: String, readme: String) -> Result<Self> {
@@ -51,7 +54,9 @@ impl Node {
                 "0.0.0.0:0".parse()?,
             )?,
             root_node_connection: ArcMutex::new(None),
+            is_register_node: ArcMutex::new(false),
             node_connection: ArcMutex::new(None),
+            node_user_name: String::new(),
         })
     }
     pub fn close(&self, error_code: u32, reason: Vec<u8>) {
@@ -132,6 +137,7 @@ impl Node {
             ))?)
             .await?;
             send.finish().await?;
+            *self.is_register_node.lock() = true;
         }
         Ok(())
     }
@@ -146,6 +152,7 @@ impl Node {
             ))?)
             .await?;
             send.finish().await?;
+            *self.is_register_node.lock() = false;
         }
         Ok(())
     }
@@ -176,7 +183,7 @@ impl Node {
         }
         Ok(())
     }
-    pub async fn connect_node(&self, uuid: String) -> Result<()> {
+    pub async fn connect_node(&mut self, uuid: String) -> Result<()> {
         if let Some(root_node_connection) = {
             let a = self.root_node_connection.lock().clone();
             a
@@ -205,6 +212,7 @@ impl Node {
                                 )?
                                 .await?,
                         );
+                        self.node_user_name = connect_node_info.user_name;
                         Ok(())
                     } else {
                         Err(eyre!("没有找到节点"))
@@ -214,6 +222,44 @@ impl Node {
             }
         } else {
             Err(eyre!("根节点连接不存在"))
+        }
+    }
+    pub fn disconnect_node(&self, error_code: u32, reason: Vec<u8>) {
+        if let Some(node_connection) = {
+            let a = self.node_connection.lock().clone();
+            a
+        } {
+            node_connection.close(VarInt::from_u32(error_code), &reason);
+        }
+    }
+    pub fn node_is_disconnect(&self) -> Result<Option<ConnectionError>> {
+        if let Some(node_connection) = {
+            let a = self.node_connection.lock().clone();
+            a
+        } {
+            Ok(node_connection.close_reason())
+        } else {
+            Err(eyre!("节点连接不存在"))
+        }
+    }
+    pub async fn accept_uni(&self) -> Result<RecvStream> {
+        if let Some(node_connection) = {
+            let a = self.node_connection.lock().clone();
+            a
+        } {
+            Ok(node_connection.accept_uni().await?)
+        } else {
+            Err(eyre!("节点连接不存在"))
+        }
+    }
+    pub async fn open_uni(&self) -> Result<SendStream> {
+        if let Some(node_connection) = {
+            let a = self.node_connection.lock().clone();
+            a
+        } {
+            Ok(node_connection.open_uni().await?)
+        } else {
+            Err(eyre!("节点连接不存在"))
         }
     }
 }

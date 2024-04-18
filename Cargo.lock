@@ -2456,6 +2456,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui_extras",
+ "env_logger",
  "eyre",
  "image 0.25.1",
  "log",
