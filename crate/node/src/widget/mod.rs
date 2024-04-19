@@ -22,30 +22,30 @@ struct Message {
 }
 
 #[derive(Clone)]
-enum GUILayoutState {
+enum WidgetLayoutState {
     Fold,
     Unfold,
 }
 
 #[derive(Clone)]
-struct GUILayoutStateSwitchButtonText(String);
-impl From<GUILayoutStateSwitchButtonText> for String {
-    fn from(value: GUILayoutStateSwitchButtonText) -> Self {
-        let GUILayoutStateSwitchButtonText(text) = value;
+struct WidgetLayoutStateSwitchButtonText(String);
+impl From<WidgetLayoutStateSwitchButtonText> for String {
+    fn from(value: WidgetLayoutStateSwitchButtonText) -> Self {
+        let WidgetLayoutStateSwitchButtonText(text) = value;
         text
     }
 }
-impl From<GUILayoutState> for GUILayoutStateSwitchButtonText {
-    fn from(value: GUILayoutState) -> Self {
+impl From<WidgetLayoutState> for WidgetLayoutStateSwitchButtonText {
+    fn from(value: WidgetLayoutState) -> Self {
         match value {
-            GUILayoutState::Fold => Self("🗖 展开程序".to_string()),
-            GUILayoutState::Unfold => Self("🗕 折叠程序".to_string()),
+            WidgetLayoutState::Fold => Self("🗖 展开程序".to_string()),
+            WidgetLayoutState::Unfold => Self("🗕 折叠程序".to_string()),
         }
     }
 }
 
 struct MenuBar {
-    gui_layout_state_switch_button_text: GUILayoutStateSwitchButtonText,
+    widget_layout_state_switch_button_text: WidgetLayoutStateSwitchButtonText,
 }
 
 #[derive(Clone)]
@@ -70,7 +70,7 @@ struct ConnectRootNodeBar {
 }
 
 struct FoldCentralPanel {
-    gui_layout_state: FoldCentralPanelLayoutState,
+    widget_layout_state: FoldCentralPanelLayoutState,
     connect_root_node_bar: ConnectRootNodeBar,
 }
 
@@ -100,43 +100,43 @@ struct ChatBar {
 }
 
 struct UnfoldCentralPanel {
-    gui_layout_state: ArcMutex<UnfoldCentralPanelLayoutState>,
+    widget_layout_state: ArcMutex<UnfoldCentralPanelLayoutState>,
     node_browser_bar: NodeBrowserBar,
     chat_bar: ChatBar,
     wait_node_connect_task: Option<JoinHandle<()>>,
 }
 
-pub struct GUInterface {
+pub struct Widget {
     system: System,
-    gui_layout_state: GUILayoutState,
-    gui_layout_state_switch_next_window_inner_size: Option<egui::Vec2>,
+    widget_layout_state: WidgetLayoutState,
+    widget_layout_state_switch_next_window_inner_size: Option<egui::Vec2>,
     menu_bar: MenuBar,
     state_bar: StateBar,
     fold_central_panel: FoldCentralPanel,
     unfold_central_panel: UnfoldCentralPanel,
     root_node_connection_state: ArcMutex<ConnectionState>,
 }
-impl GUInterface {
+impl Widget {
     pub fn new(system: System) -> Result<Self> {
         let selfx = Self {
             system,
-            gui_layout_state: GUILayoutState::Fold,
-            gui_layout_state_switch_next_window_inner_size: Some(egui::Vec2::new(1000., 750.)),
+            widget_layout_state: WidgetLayoutState::Fold,
+            widget_layout_state_switch_next_window_inner_size: Some(egui::Vec2::new(1000., 750.)),
             menu_bar: MenuBar {
-                gui_layout_state_switch_button_text: GUILayoutState::Fold.into(),
+                widget_layout_state_switch_button_text: WidgetLayoutState::Fold.into(),
             },
             state_bar: StateBar {
                 log: ArcMutex::new(None),
             },
             fold_central_panel: FoldCentralPanel {
-                gui_layout_state: FoldCentralPanelLayoutState::Readme,
+                widget_layout_state: FoldCentralPanelLayoutState::Readme,
                 connect_root_node_bar: ConnectRootNodeBar {
                     is_enable: ArcMutex::new(true),
                     root_node_selected: 0,
                 },
             },
             unfold_central_panel: UnfoldCentralPanel {
-                gui_layout_state: ArcMutex::new(UnfoldCentralPanelLayoutState::NodeBrowser),
+                widget_layout_state: ArcMutex::new(UnfoldCentralPanelLayoutState::NodeBrowser),
                 node_browser_bar: NodeBrowserBar {
                     node_info_list: ArcMutex::new(Vec::new()),
                     row_selected_index: ArcMutex::new(None),
@@ -158,28 +158,32 @@ impl GUInterface {
         }
         Ok(selfx)
     }
-    fn gui_layout_state_switch(&mut self, ctx: &egui::Context, gui_layout_state: GUILayoutState) {
+    fn widget_layout_state_switch(
+        &mut self,
+        ctx: &egui::Context,
+        widget_layout_state: WidgetLayoutState,
+    ) {
         if let Some(gui_layout_state_switch_next_window_inner_size) =
-            self.gui_layout_state_switch_next_window_inner_size
+            self.widget_layout_state_switch_next_window_inner_size
         {
-            self.gui_layout_state = gui_layout_state;
-            self.menu_bar.gui_layout_state_switch_button_text =
-                self.gui_layout_state.clone().into();
-            self.gui_layout_state_switch_next_window_inner_size =
+            self.widget_layout_state = widget_layout_state;
+            self.menu_bar.widget_layout_state_switch_button_text =
+                self.widget_layout_state.clone().into();
+            self.widget_layout_state_switch_next_window_inner_size =
                 ctx.input(|i| i.viewport().inner_rect).map(|v| v.size());
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
                 gui_layout_state_switch_next_window_inner_size,
             ));
-            match self.gui_layout_state {
-                GUILayoutState::Fold => {
+            match self.widget_layout_state {
+                WidgetLayoutState::Fold => {
                     *self
                         .unfold_central_panel
                         .node_browser_bar
                         .node_info_list
                         .lock() = Vec::new();
                 }
-                GUILayoutState::Unfold => match {
-                    let a = self.unfold_central_panel.gui_layout_state.lock().clone();
+                WidgetLayoutState::Unfold => match {
+                    let a = self.unfold_central_panel.widget_layout_state.lock().clone();
                     a
                 } {
                     UnfoldCentralPanelLayoutState::NodeBrowser => {
@@ -322,12 +326,12 @@ impl GUInterface {
         }
     }
 }
-impl Drop for GUInterface {
+impl Drop for Widget {
     fn drop(&mut self) {
         self.system.node.close(0, "程序关闭".as_bytes().to_vec());
     }
 }
-impl eframe::App for GUInterface {
+impl eframe::App for Widget {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("MenuBar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -341,35 +345,35 @@ impl eframe::App for GUInterface {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .button(String::from(
-                            self.menu_bar.gui_layout_state_switch_button_text.clone(),
+                            self.menu_bar.widget_layout_state_switch_button_text.clone(),
                         ))
                         .clicked()
                     {
-                        match self.gui_layout_state {
-                            GUILayoutState::Fold => {
-                                self.gui_layout_state_switch(ctx, GUILayoutState::Unfold);
+                        match self.widget_layout_state {
+                            WidgetLayoutState::Fold => {
+                                self.widget_layout_state_switch(ctx, WidgetLayoutState::Unfold);
                             }
-                            GUILayoutState::Unfold => {
-                                self.gui_layout_state_switch(ctx, GUILayoutState::Fold);
+                            WidgetLayoutState::Unfold => {
+                                self.widget_layout_state_switch(ctx, WidgetLayoutState::Fold);
                             }
                         }
                     }
-                    match self.gui_layout_state {
-                        GUILayoutState::Fold => {
+                    match self.widget_layout_state {
+                        WidgetLayoutState::Fold => {
                             ui.menu_button("切换视图", |ui| {
                                 ui.radio_value(
-                                    &mut self.fold_central_panel.gui_layout_state,
+                                    &mut self.fold_central_panel.widget_layout_state,
                                     FoldCentralPanelLayoutState::Readme,
                                     "软件自述视图",
                                 );
                                 ui.radio_value(
-                                    &mut self.fold_central_panel.gui_layout_state,
+                                    &mut self.fold_central_panel.widget_layout_state,
                                     FoldCentralPanelLayoutState::ConnectRootNode,
                                     "连接根节点视图",
                                 );
                             });
                         }
-                        GUILayoutState::Unfold => (),
+                        WidgetLayoutState::Unfold => (),
                     }
                 });
             });
@@ -403,15 +407,15 @@ impl eframe::App for GUInterface {
                 }
             });
         });
-        egui::CentralPanel::default().show(ctx, |ui| match self.gui_layout_state {
-            GUILayoutState::Fold => match self.fold_central_panel.gui_layout_state {
+        egui::CentralPanel::default().show(ctx, |ui| match self.widget_layout_state {
+            WidgetLayoutState::Fold => match self.fold_central_panel.widget_layout_state {
                 FoldCentralPanelLayoutState::Readme => {
                     ui.horizontal_top(|ui| {
                         ui.add(
                             egui::Image::new(egui::ImageSource::Bytes {
                                 uri: Cow::default(),
                                 bytes: egui::load::Bytes::Static(include_bytes!(
-                                    "../../../assets/icon/node_network_icon.png"
+                                    "../../../../assets/icon/node_network_icon.png"
                                 )),
                             })
                             .max_size(egui::Vec2::new(512. * 0.3, 512. * 0.3)),
@@ -516,8 +520,8 @@ impl eframe::App for GUInterface {
                     });
                 }
             },
-            GUILayoutState::Unfold => match {
-                let a = self.unfold_central_panel.gui_layout_state.lock().clone();
+            WidgetLayoutState::Unfold => match {
+                let a = self.unfold_central_panel.widget_layout_state.lock().clone();
                 a
             } {
                 UnfoldCentralPanelLayoutState::NodeBrowser => {
@@ -532,7 +536,7 @@ impl eframe::App for GUInterface {
                                 |ui| {
                                     if ui.button("注册节点").clicked() {
                                         {
-                                            *self.unfold_central_panel.gui_layout_state.lock() =
+                                            *self.unfold_central_panel.widget_layout_state.lock() =
                                                 UnfoldCentralPanelLayoutState::Chat;
                                         }
                                         {
@@ -716,7 +720,7 @@ impl eframe::App for GUInterface {
                                             {
                                                 *self
                                                     .unfold_central_panel
-                                                    .gui_layout_state
+                                                    .widget_layout_state
                                                     .lock() =
                                                     UnfoldCentralPanelLayoutState::NodeBrowser;
                                             }
@@ -893,7 +897,7 @@ impl eframe::App for GUInterface {
                                 .row_selected_index
                                 .clone();
                             let unfold_central_panel_gui_layout_state =
-                                self.unfold_central_panel.gui_layout_state.clone();
+                                self.unfold_central_panel.widget_layout_state.clone();
                             let node_browser_bar_node_info_list = self
                                 .unfold_central_panel
                                 .node_browser_bar
