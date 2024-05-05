@@ -5,7 +5,7 @@ use x509_parser::{
     extensions::{GeneralName, ParsedExtension},
 };
 
-pub fn x509_dns_name_from_der(cert_der: Vec<u8>) -> Result<String> {
+pub fn x509_dns_name_from_cert_der(cert_der: Vec<u8>) -> Result<String> {
     for x509extension in X509Certificate::from_der(&cert_der)?
         .1
         .tbs_certificate
