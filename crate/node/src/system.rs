@@ -1,14 +1,14 @@
 use eyre::Result;
 
-use crate::node::Node;
+use crate::node::{NewNodeInfo, Node};
 
 pub struct System {
-    pub node: Node,
+    node: Node,
 }
 impl System {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            node: Node::new("测试节点".to_string())?,
+            node: Node::new("测试节点".to_string(), NewNodeInfo::default())?,
         })
     }
 }

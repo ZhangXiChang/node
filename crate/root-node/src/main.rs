@@ -2,7 +2,7 @@ use std::{fs::File, io::Read, sync::Arc, time::Duration};
 
 use clap::Parser;
 use eyre::Result;
-use protocol::DataPacket;
+use protocol::{DataPacket, NodeInfo};
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 
 #[derive(Parser)]
@@ -56,8 +56,17 @@ async fn main() -> Result<()> {
                             .read_to_end(usize::MAX)
                             .await?,
                     )? {
-                        DataPacket::NodeInfo { name, uuid } => {
-                            log::info!("节点名称：{} 节点UUID：{}", name, uuid)
+                        DataPacket::NodeInfo(NodeInfo {
+                            name,
+                            uuid,
+                            description,
+                        }) => {
+                            log::info!(
+                                "节点名称：{} 节点UUID：{} 节点描述：{}",
+                                name,
+                                uuid,
+                                description
+                            )
                         }
                     }
                 }

@@ -1,22 +1,27 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use eyre::Result;
-use protocol::DataPacket;
+use protocol::{DataPacket, NodeInfo};
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
 use rustls::RootCertStore;
 use share_code::{lock::ArcMutex, x509::x509_dns_name_from_cert_der};
 use uuid::Uuid;
 
+#[derive(Default)]
+pub struct NewNodeInfo {
+    pub description: String,
+}
 #[derive(Clone)]
 pub struct Node {
     endpoint: Endpoint,
     cert_der: ArcMutex<Vec<u8>>,
     name: ArcMutex<String>,
     uuid: ArcMutex<String>,
+    description: ArcMutex<String>,
     root_node_connection: ArcMutex<Option<Connection>>,
 }
 impl Node {
-    pub fn new(name: String) -> Result<Self> {
+    pub fn new(name: String, info: NewNodeInfo) -> Result<Self> {
         let rcgen::CertifiedKey { cert, key_pair } =
             rcgen::generate_simple_self_signed(vec![Uuid::new_v4().to_string()])?;
         Ok(Self {
@@ -36,6 +41,7 @@ impl Node {
             cert_der: ArcMutex::new(cert.der().to_vec()),
             name: ArcMutex::new(name),
             uuid: ArcMutex::new(Uuid::new_v4().to_string()),
+            description: ArcMutex::new(info.description),
             root_node_connection: ArcMutex::new(None),
         })
     }
@@ -59,7 +65,7 @@ impl Node {
         root_node_connection
             .open_uni()
             .await?
-            .write_all(&rmp_serde::to_vec(&DataPacket::NodeInfo {
+            .write_all(&rmp_serde::to_vec(&DataPacket::NodeInfo(NodeInfo {
                 name: {
                     let a = self.name.lock().clone();
                     a
@@ -68,7 +74,11 @@ impl Node {
                     let a = self.uuid.lock().clone();
                     a
                 },
-            })?)
+                description: {
+                    let a = self.description.lock().clone();
+                    a
+                },
+            }))?)
             .await?;
         tokio::spawn({
             let root_node_connection = root_node_connection.clone();
