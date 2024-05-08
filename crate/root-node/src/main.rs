@@ -49,24 +49,28 @@ async fn main() -> Result<()> {
             match async {
                 let connection = connecting.await?;
                 loop {
-                    match rmp_serde::from_slice::<DataPacket>(
-                        &connection
-                            .accept_uni()
-                            .await?
-                            .read_to_end(usize::MAX)
-                            .await?,
-                    )? {
-                        DataPacket::NodeInfo(NodeInfo {
-                            name,
-                            uuid,
-                            description,
-                        }) => {
-                            log::info!(
-                                "节点名称：{} 节点UUID：{} 节点描述：{}",
-                                name,
-                                uuid,
-                                description
-                            )
+                    match connection.accept_uni().await {
+                        Ok(mut read) => {
+                            match rmp_serde::from_slice::<DataPacket>(
+                                &read.read_to_end(usize::MAX).await?,
+                            )? {
+                                DataPacket::NodeInfo(NodeInfo {
+                                    name,
+                                    uuid,
+                                    description,
+                                }) => {
+                                    log::info!(
+                                        "节点名称：{} 节点UUID：{} 节点描述：{}",
+                                        name,
+                                        uuid,
+                                        description
+                                    )
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            log::info!("[{}]连接关闭，原因：{}", connection.remote_address(), err);
+                            break;
                         }
                     }
                 }

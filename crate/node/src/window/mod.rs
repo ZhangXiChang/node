@@ -21,7 +21,7 @@ impl Window {
             system,
             menu_bar: MenuBar,
             state_bar: StateBar::new(),
-            central_panel: CentralPanel,
+            central_panel: CentralPanel::new(),
         };
         eframe::run_native(
             "节点网络",

@@ -1,8 +1,10 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use eyre::Result;
+use eyre::{eyre, Result};
 use protocol::{DataPacket, NodeInfo};
-use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig};
+use quinn::{
+    ClientConfig, Connection, ConnectionError, Endpoint, ServerConfig, TransportConfig, VarInt,
+};
 use rustls::RootCertStore;
 use share_code::{lock::ArcMutex, x509::x509_dns_name_from_cert_der};
 use uuid::Uuid;
@@ -45,68 +47,99 @@ impl Node {
             root_node_connection: ArcMutex::new(None),
         })
     }
-    pub async fn register_node(
+    pub fn close(&self, code: u32, reason: Vec<u8>) {
+        self.endpoint.close(VarInt::from_u32(code), &reason);
+    }
+    pub async fn connect_root_node(
         &self,
         root_node_socket_addr: SocketAddr,
         root_node_cert_der: Vec<u8>,
     ) -> Result<()> {
-        let root_node_connection = self
-            .endpoint
-            .connect_with(
-                ClientConfig::with_root_certificates({
-                    let mut a = RootCertStore::empty();
-                    a.add(&rustls::Certificate(root_node_cert_der.clone()))?;
-                    a
-                }),
-                root_node_socket_addr,
-                &x509_dns_name_from_cert_der(root_node_cert_der)?,
-            )?
-            .await?;
-        root_node_connection
-            .open_uni()
-            .await?
-            .write_all(&rmp_serde::to_vec(&DataPacket::NodeInfo(NodeInfo {
-                name: {
-                    let a = self.name.lock().clone();
-                    a
-                },
-                uuid: {
-                    let a = self.uuid.lock().clone();
-                    a
-                },
-                description: {
-                    let a = self.description.lock().clone();
-                    a
-                },
-            }))?)
-            .await?;
-        tokio::spawn({
-            let root_node_connection = root_node_connection.clone();
-            async move {
-                match async {
-                    loop {
-                        match rmp_serde::from_slice::<DataPacket>(
-                            &root_node_connection
-                                .accept_uni()
-                                .await?
-                                .read_to_end(usize::MAX)
-                                .await?,
-                        )? {
-                            _ => (),
+        *self.root_node_connection.lock() = Some(
+            self.endpoint
+                .connect_with(
+                    ClientConfig::with_root_certificates({
+                        let mut a = RootCertStore::empty();
+                        a.add(&rustls::Certificate(root_node_cert_der.clone()))?;
+                        a
+                    }),
+                    root_node_socket_addr,
+                    &x509_dns_name_from_cert_der(root_node_cert_der)?,
+                )?
+                .await?,
+        );
+        Ok(())
+    }
+    pub fn close_root_node_connect(&self, code: u32, reason: Vec<u8>) {
+        if let Some(root_node_connection) = {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            root_node_connection.close(VarInt::from_u32(code), &reason)
+        }
+    }
+    pub fn root_node_state(&self) -> Result<Option<ConnectionError>> {
+        match {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            Some(root_node_connection) => Ok(root_node_connection.close_reason()),
+            None => Err(eyre!("根节点不存在")),
+        }
+    }
+    pub async fn register(&self) -> Result<()> {
+        if let Some(root_node_connection) = {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            root_node_connection
+                .open_uni()
+                .await?
+                .write_all(&rmp_serde::to_vec(&DataPacket::NodeInfo(NodeInfo {
+                    name: {
+                        let a = self.name.lock().clone();
+                        a
+                    },
+                    uuid: {
+                        let a = self.uuid.lock().clone();
+                        a
+                    },
+                    description: {
+                        let a = self.description.lock().clone();
+                        a
+                    },
+                }))?)
+                .await?;
+            tokio::spawn({
+                async move {
+                    match async {
+                        loop {
+                            match root_node_connection.accept_uni().await {
+                                Ok(mut read) => match rmp_serde::from_slice::<DataPacket>(
+                                    &read.read_to_end(usize::MAX).await?,
+                                )? {
+                                    _ => (),
+                                },
+                                Err(err) => {
+                                    log::info!(
+                                        "[{}]连接关闭，原因：{}",
+                                        root_node_connection.remote_address(),
+                                        err
+                                    );
+                                    break;
+                                }
+                            }
                         }
+                        #[allow(unreachable_code)]
+                        eyre::Ok(())
                     }
-                    #[allow(unreachable_code)]
-                    eyre::Ok(())
+                    .await
+                    {
+                        Ok(_) => (),
+                        Err(err) => log::error!("{}", err),
+                    }
                 }
-                .await
-                {
-                    Ok(_) => (),
-                    Err(err) => log::error!("{}", err),
-                }
-            }
-        });
-        {
-            *self.root_node_connection.lock() = Some(root_node_connection);
+            });
         }
         Ok(())
     }
