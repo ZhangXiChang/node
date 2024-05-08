@@ -68,26 +68,6 @@ impl Node {
                 )?
                 .await?,
         );
-        Ok(())
-    }
-    pub fn close_root_node_connect(&self, code: u32, reason: Vec<u8>) {
-        if let Some(root_node_connection) = {
-            let a = self.root_node_connection.lock().clone();
-            a
-        } {
-            root_node_connection.close(VarInt::from_u32(code), &reason)
-        }
-    }
-    pub fn root_node_state(&self) -> Result<Option<ConnectionError>> {
-        match {
-            let a = self.root_node_connection.lock().clone();
-            a
-        } {
-            Some(root_node_connection) => Ok(root_node_connection.close_reason()),
-            None => Err(eyre!("根节点不存在")),
-        }
-    }
-    pub async fn register(&self) -> Result<()> {
         if let Some(root_node_connection) = {
             let a = self.root_node_connection.lock().clone();
             a
@@ -142,5 +122,22 @@ impl Node {
             });
         }
         Ok(())
+    }
+    pub fn close_root_node_connect(&self, code: u32, reason: Vec<u8>) {
+        if let Some(root_node_connection) = {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            root_node_connection.close(VarInt::from_u32(code), &reason)
+        }
+    }
+    pub fn root_node_state(&self) -> Result<Option<ConnectionError>> {
+        match {
+            let a = self.root_node_connection.lock().clone();
+            a
+        } {
+            Some(root_node_connection) => Ok(root_node_connection.close_reason()),
+            None => Err(eyre!("根节点不存在")),
+        }
     }
 }

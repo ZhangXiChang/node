@@ -117,7 +117,6 @@ impl Widget for CentralPanel {
                                                         )));
                                                     }
                                                 }
-                                                node.register().await?;
                                                 eyre::Ok(())
                                             }
                                             .await
