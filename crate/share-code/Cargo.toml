@@ -1,9 +1,0 @@
-[package]
-name = "share-code"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-eyre = "0.6.12" #错误报告
-
-x509-parser = "0.16.0" #X.509证书解码
