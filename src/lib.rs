@@ -47,7 +47,7 @@ pub struct Node {
     endpoint: Endpoint,
 }
 impl Node {
-    pub fn new(cert_der: Vec<u8>, key_pair: Vec<u8>) -> Result<Self> {
+    pub fn new(cert_der: Vec<u8>, key_pair_der: Vec<u8>) -> Result<Self> {
         Ok(Self {
             info: ArcMutex::new(NodeInfo {
                 uuid: Uuid::new_v4().to_string(),
@@ -58,7 +58,7 @@ impl Node {
             endpoint: Endpoint::server(
                 ServerConfig::with_single_cert(
                     vec![CertificateDer::from(cert_der)],
-                    PrivatePkcs8KeyDer::from(key_pair).into(),
+                    PrivatePkcs8KeyDer::from(key_pair_der).into(),
                 )?
                 .transport_config(Arc::new({
                     let mut a = TransportConfig::default();
