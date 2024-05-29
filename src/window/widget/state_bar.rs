@@ -5,7 +5,7 @@ use crate::window::Window;
 
 use super::Widget;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum HubNodeState {
     Connected,
     Disconnect,
@@ -30,11 +30,14 @@ impl StateBar {
             log: ArcMutex::new(None),
         }
     }
-    pub fn set_root_node_state(&mut self, state: HubNodeState) {
+    pub fn set_hub_node_state(&self, state: HubNodeState) {
         *self.hub_node_state.lock() = state;
     }
-    pub fn set_log(&mut self, log: Option<Log>) {
+    pub fn set_log(&self, log: Option<Log>) {
         *self.log.lock() = log;
+    }
+    pub fn get_hub_node_state(&self) -> HubNodeState {
+        self.hub_node_state.lock().clone()
     }
 }
 impl Widget for StateBar {
