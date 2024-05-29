@@ -127,7 +127,7 @@ impl Widget for CentralPanel {
                             window
                                 .system
                                 .node
-                                .close_hub_node(0, 0, "手动关闭连接".as_bytes());
+                                .close_hub_node(0, "手动关闭连接".as_bytes());
                             window
                                 .state_bar
                                 .set_hub_node_state(HubNodeState::Disconnect);

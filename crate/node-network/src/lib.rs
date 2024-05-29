@@ -51,7 +51,7 @@ pub struct Node {
     info: ArcMutex<NodeInfo>,
     cert_der: Arc<Vec<u8>>,
     endpoint: Endpoint,
-    hub_node_list: ArcMutex<Vec<PeerNode>>,
+    hub_node: ArcMutex<Option<PeerNode>>,
 }
 impl Node {
     pub fn new(socket_addr: SocketAddr, cert_der: Vec<u8>, key_pair_der: Vec<u8>) -> Result<Self> {
@@ -78,7 +78,7 @@ impl Node {
                 .clone(),
                 socket_addr,
             )?,
-            hub_node_list: ArcMutex::new(Vec::new()),
+            hub_node: ArcMutex::new(None),
         })
     }
     pub fn new_from_new_cert(socket_addr: SocketAddr) -> Result<Self> {
@@ -95,8 +95,13 @@ impl Node {
     pub fn close(&self, code: u32, reason: &[u8]) {
         self.endpoint.close(VarInt::from_u32(code), reason);
     }
-    pub fn close_hub_node(&self, index: usize, code: u32, reason: &[u8]) {
-        self.hub_node_list.lock()[index].close(code, reason);
+    pub fn close_hub_node(&self, code: u32, reason: &[u8]) {
+        if let Some(peer_node) = {
+            let a = self.hub_node.lock().clone();
+            a
+        } {
+            peer_node.close(code, reason);
+        }
     }
     pub async fn accept_peer_node(&self) -> Result<PeerNode> {
         if let Some(incoming) = self.endpoint.accept().await {
@@ -147,8 +152,7 @@ impl Node {
         }
     }
     pub async fn access_hub_node(&self, socket_addr: SocketAddr, cert_der: Vec<u8>) -> Result<()> {
-        let mut hub_node_list = self.hub_node_list.lock().clone();
-        hub_node_list.push(
+        *self.hub_node.lock() = Some(
             PeerNode::new(
                 {
                     let server_name = x509_dns_name_from_cert_der(&cert_der)?;
@@ -173,7 +177,6 @@ impl Node {
             )
             .await?,
         );
-        *self.hub_node_list.lock() = hub_node_list;
         Ok(())
     }
     // pub async fn connect_hub_node(&self, socket_addr: SocketAddr, cert_der: Vec<u8>) -> Result<()> {
