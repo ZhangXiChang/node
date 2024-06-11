@@ -5,7 +5,7 @@ use std::sync::Arc;
 use eframe::egui;
 use eyre::{eyre, Result};
 
-use crate::system::System;
+use crate::{system::System, FONT_FILE_DATA, ICON_FILE_DATA};
 
 use self::widget::{central_panel::CentralPanel, menu_bar::MenuBar, state_bar::StateBar, Widget};
 
@@ -19,21 +19,18 @@ impl Window {
         let self_ = Self {
             system,
             state_bar: StateBar::new(),
-            central_panel: CentralPanel::new(),
+            central_panel: CentralPanel::new()?,
         };
         eframe::run_native(
             "节点网络",
             eframe::NativeOptions {
                 viewport: egui::ViewportBuilder {
                     icon: Some(Arc::new(egui::IconData {
-                        rgba: image::load_from_memory(include_bytes!(
-                            "../../assets/icon/node_network_icon.png"
-                        ))?
-                        .into_bytes(),
+                        rgba: image::load_from_memory(ICON_FILE_DATA)?.into_bytes(),
                         width: 512,
                         height: 512,
                     })),
-                    inner_size: Some(egui::Vec2::new(500., 500. + 50.)),
+                    inner_size: Some(egui::Vec2::new(1250., 800.)),
                     resizable: Some(false),
                     maximize_button: Some(false),
                     ..Default::default()
@@ -53,9 +50,7 @@ impl Window {
         let mut font_definitions = egui::FontDefinitions::default();
         font_definitions.font_data.insert(
             "font".to_string(),
-            egui::FontData::from_static(include_bytes!(
-                "../../assets/fonts/SourceHanSansCN-Bold.otf"
-            )),
+            egui::FontData::from_static(FONT_FILE_DATA),
         );
         font_definitions
             .families
@@ -73,14 +68,14 @@ impl Window {
 impl eframe::App for Window {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("MenuBar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                 MenuBar::update(self, ui, ctx);
-            })
+            });
         });
         egui::TopBottomPanel::bottom("StateBar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                 StateBar::update(self, ui, ctx);
-            })
+            });
         });
         egui::CentralPanel::default().show(ctx, |ui| CentralPanel::update(self, ui, ctx));
     }
